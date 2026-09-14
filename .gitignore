@@ -1,0 +1,19 @@
+# Llaves y contraseñas — en cualquier carpeta
+secrets.toml
+.env
+
+# Configuración de PyCharm
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Descargas
+*.zip
+
+# Windows
+Thumbs.db
+desktop.ini
