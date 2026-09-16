@@ -1,0 +1,13 @@
+# Llaves y contraseñas — NUNCA subir
+.streamlit/secrets.toml
+.env
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Windows
+Thumbs.db
+desktop.ini
