@@ -1,9 +1,6 @@
-# Llaves y contraseñas — en cualquier carpeta
+# Llaves y contraseñas — NUNCA subir
 secrets.toml
 .env
-
-# Configuración de PyCharm
-.idea/
 
 # Python
 __pycache__/
@@ -11,7 +8,7 @@ __pycache__/
 venv/
 .venv/
 
-# Descargas
+#descargas
 *.zip
 
 # Windows

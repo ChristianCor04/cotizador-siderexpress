@@ -8,9 +8,16 @@ este archivo. Las pantallas y la lógica no se enteran.
 
 Cada función hace UNA consulta y devuelve listas o diccionarios de Python.
 """
+from datetime import datetime, timezone
+
 import streamlit as st
 
 from config import conectar
+
+
+def _ahora() -> str:
+    """Fecha y hora actual en UTC, en el formato que espera Supabase."""
+    return datetime.now(timezone.utc).isoformat()
 
 
 # ===========================================================================
@@ -43,8 +50,13 @@ def iniciar_sesion(email: str, password: str) -> tuple[dict | None, str | None]:
     st.session_state.refresh_token = sesion.session.refresh_token
 
     # Paso 2: buscar su perfil. Auth guarda la contraseña; m_usuarios el rol.
-    perfil = sb.table("m_usuarios").select("*, m_zonas(nombre)") \
-        .eq("id_usuario", id_usuario).execute().data
+    perfil = sb.table("m_usuarios").select(
+        # "m_zonas!fk_usuario_zona" precisa el camino: m_usuarios llega a
+        # m_zonas por la zona principal y también por rel_usuarios_zonas,
+        # que es una tabla puente. Sin precisarlo, la API lo rechaza.
+        "*, m_zonas!fk_usuario_zona(nombre), "
+        "rel_usuarios_zonas(id_zona, m_zonas(nombre))"
+    ).eq("id_usuario", id_usuario).execute().data
 
     if not perfil:
         sb.auth.sign_out()
@@ -76,8 +88,13 @@ def reanudar_sesion(refresh_token: str) -> dict | None:
         return None
 
     st.session_state.refresh_token = sesion.session.refresh_token
-    perfil = sb.table("m_usuarios").select("*, m_zonas(nombre)") \
-        .eq("id_usuario", sesion.user.id).execute().data
+    perfil = sb.table("m_usuarios").select(
+        # "m_zonas!fk_usuario_zona" precisa el camino: m_usuarios llega a
+        # m_zonas por la zona principal y también por rel_usuarios_zonas,
+        # que es una tabla puente. Sin precisarlo, la API lo rechaza.
+        "*, m_zonas!fk_usuario_zona(nombre), "
+        "rel_usuarios_zonas(id_zona, m_zonas(nombre))"
+    ).eq("id_usuario", sesion.user.id).execute().data
     return perfil[0] if perfil else None
 
 
@@ -96,25 +113,25 @@ def cerrar_sesion():
 
 @st.cache_data(ttl=600)
 def catalogo_skus() -> list[dict]:
-    """Productos disponibles, con marca y unidad. Alimenta el buscador."""
-    filas = conectar().table("m_skus").select(
-        "id_sku, peso_kg, "
-        "m_productos(id_producto, nombre, m_categorias(nombre)), "
-        "m_marcas(id_marca, nombre), "
-        "m_unidades_medida(codigo, nombre)"
-    ).eq("activo", True).execute().data
+    """Productos disponibles, con marca, unidad y en cuántas sedes hay precio.
 
-    catalogo = []
-    for f in filas:
-        catalogo.append({
-            "id_sku": f["id_sku"],
-            "producto": f["m_productos"]["nombre"],
-            "id_producto": f["m_productos"]["id_producto"],
-            "categoria": f["m_productos"]["m_categorias"]["nombre"],
-            "marca": f["m_marcas"]["nombre"],
-            "unidad": f["m_unidades_medida"]["codigo"],
-            "peso_kg": f["peso_kg"],
-        })
+    Viene de la vista v_catalogo_skus: así la app sabe qué unidades se cotizan
+    de verdad y cuáles están creadas pero sin precio.
+    """
+    filas = conectar().table("v_catalogo_skus").select("*").execute().data
+
+    catalogo = [{
+        "id_sku": f["id_sku"],
+        "producto": f["producto"],
+        "id_producto": f["id_producto"],
+        "categoria": f["categoria"],
+        "marca": f["marca"],
+        "unidad": f["unidad"],
+        "unidad_nombre": f["unidad_nombre"],
+        "peso_kg": f["peso_kg"],
+        "n_sedes": f.get("n_sedes") or 0,
+    } for f in filas]
+
     return sorted(catalogo, key=lambda x: (x["producto"], x["marca"]))
 
 
@@ -233,7 +250,16 @@ def buscar_cliente_por_telefono(telefono: str) -> dict | None:
     La base normaliza el número antes de comparar, así que da igual si el
     asesor escribe 987654321, 51987654321 o +51 987 654 321.
     """
-    filas = conectar().rpc("buscar_cliente", {"p_telefono": telefono}).execute().data
+    # Si el texto no se parece a un teléfono, ni se consulta: la base
+    # lanzaría un error al intentar normalizarlo.
+    digitos = "".join(c for c in telefono if c.isdigit())
+    if not 8 <= len(digitos) <= 11:
+        return None
+
+    try:
+        filas = conectar().rpc("buscar_cliente", {"p_telefono": telefono}).execute().data
+    except Exception:
+        return None
     if not filas:
         return None
 
@@ -258,14 +284,28 @@ def actualizar_cliente(id_cliente: int, datos: dict) -> dict:
 # NEGOCIACIONES
 # ===========================================================================
 
+# Lo que se trae de cada negociación. Está en un solo lugar para que la lista
+# y la búsqueda devuelvan exactamente los mismos campos.
+SELECT_NEGOCIACION = (
+    "*, m_clientes(*, m_tipos_cliente(segmento, nombre)), "
+    "m_distritos(nombre), "
+    "rel_negociacion_tickets(ticket, tipo, fecha_ticket)"
+)
+
+
+def negociacion_por_id(id_negociacion: int) -> dict | None:
+    filas = conectar().table("fact_negociaciones").select(SELECT_NEGOCIACION) \
+        .eq("id_negociacion", id_negociacion).execute().data
+    return filas[0] if filas else None
+
+
 def negociaciones_del_asesor(id_usuario: str, estados: list[str]) -> list[dict]:
     """Las negociaciones del asesor. El RLS ya impide ver las de otros."""
     # Se piden TODAS las columnas del cliente ("m_clientes(*)"): si se listan
     # una por una, es fácil olvidar alguna y la app cree que el dato falta.
-    return conectar().table("fact_negociaciones").select(
-        "*, m_clientes(*, m_tipos_cliente(segmento, nombre)), m_distritos(nombre)"
-    ).eq("id_usuario", id_usuario).in_("estado", estados) \
-     .order("fecha_inicio", desc=True).execute().data
+    return conectar().table("fact_negociaciones").select(SELECT_NEGOCIACION) \
+        .eq("id_usuario", id_usuario).in_("estado", estados) \
+        .order("fecha_inicio", desc=True).execute().data
 
 
 def crear_negociacion(datos: dict) -> dict:
@@ -273,11 +313,26 @@ def crear_negociacion(datos: dict) -> dict:
 
 
 def cerrar_negociacion(id_negociacion: int, id_motivo: int) -> None:
-    conectar().table("fact_negociaciones").update({
-        "estado": "perdida",
-        "id_motivo_perdida": id_motivo,
-        "fecha_cierre": "now()",
-    }).eq("id_negociacion", id_negociacion).execute()
+    """Cierra la negociación como perdida, con su motivo.
+
+    Usa la función de la base porque además valida que no tenga una venta
+    viva y marca como rechazadas las cotizaciones que seguían abiertas.
+    """
+    conectar().rpc("cerrar_negociacion", {
+        "p_id_negociacion": id_negociacion,
+        "p_id_motivo": id_motivo,
+    }).execute()
+
+
+def negociacion_abierta_de(id_cliente: int) -> dict | None:
+    """Si el cliente ya tiene una negociación activa, devuelve lo mínimo de ella.
+
+    Funciona aunque sea de otro asesor: por eso la consulta va por una función
+    de la base con permisos elevados.
+    """
+    filas = conectar().rpc("negociacion_abierta_de_cliente",
+                           {"p_id_cliente": id_cliente}).execute().data
+    return filas[0] if filas else None
 
 
 # ===========================================================================
@@ -285,19 +340,38 @@ def cerrar_negociacion(id_negociacion: int, id_motivo: int) -> None:
 # ===========================================================================
 
 def cotizaciones_de(id_negociacion: int) -> list[dict]:
-    return conectar().table("fact_cotizaciones").select("*") \
-        .eq("id_negociacion", id_negociacion).order("version", desc=True).execute().data
+    """Cotizaciones de la negociación, de la más nueva a la más vieja.
+
+    Incluye la ferretería con la que se cotizó: el asesor necesita verla al
+    retomar la negociación.
+    """
+    # "m_sedes!fk_cot_sede" indica por cuál camino unir: fact_cotizaciones
+    # llega a m_sedes de dos formas (la sede elegida y las evaluadas), y sin
+    # precisarlo la API responde que la relación es ambigua.
+    filas = conectar().table("fact_cotizaciones").select(
+        "*, m_sedes!fk_cot_sede(id_sede, codigo, nombre, m_ferreterias(nombre))"
+    ).eq("id_negociacion", id_negociacion).order("version", desc=True).execute().data
+
+    for f in filas:
+        sede = f.get("m_sedes") or {}
+        f["sede_codigo"] = sede.get("codigo")
+        f["sede_nombre"] = sede.get("nombre")
+        f["ferreteria"] = (sede.get("m_ferreterias") or {}).get("nombre")
+    return filas
 
 
 def detalle_de_cotizacion(id_cotizacion: int) -> list[dict]:
     filas = conectar().table("fact_cotizaciones_detalle").select(
-        "*, m_skus(id_sku, m_productos(nombre), m_marcas(nombre))"
+        "*, m_skus(id_sku, m_productos(nombre), m_marcas(nombre), "
+        "m_unidades_medida(codigo, nombre))"
     ).eq("id_cotizacion", id_cotizacion).execute().data
 
     return [{
         "id_sku": f["id_sku"],
         "producto": f["m_skus"]["m_productos"]["nombre"],
         "marca": f["m_skus"]["m_marcas"]["nombre"],
+        "unidad": (f["m_skus"].get("m_unidades_medida") or {}).get("codigo"),
+        "unidad_nombre": (f["m_skus"].get("m_unidades_medida") or {}).get("nombre"),
         "cantidad": float(f["cantidad"]),
         "precio_unitario": float(f["precio_unitario"]),
         "precio_modificado": float(f["precio_modificado"]) if f["precio_modificado"] else None,
@@ -335,7 +409,13 @@ def buscar_por_codigo_cotizacion(id_cotizacion: int) -> dict | None:
 # ===========================================================================
 
 def promociones_de_sede(id_sede: int, monto: float, id_cliente: int | None) -> list[dict]:
-    return conectar().rpc("beneficio_promocional", {
+    """TODAS las promociones que aplican, no solo la mejor.
+
+    Se usa promociones_aplicables en vez de beneficio_promocional porque la
+    pantalla deja que el asesor elija: necesita ver también las que compiten
+    entre sí, no solo la que ganaría por defecto.
+    """
+    return conectar().rpc("promociones_aplicables", {
         "p_id_sede": id_sede,
         "p_monto": monto,
         "p_id_cliente": id_cliente,
@@ -344,7 +424,13 @@ def promociones_de_sede(id_sede: int, monto: float, id_cliente: int | None) -> l
 
 
 def bonos_post_venta(id_sede: int, monto: float, id_cliente: int | None) -> list[dict]:
-    return conectar().rpc("beneficio_promocional", {
+    """Bonos que se entregan después de comprar.
+
+    El asesor también los elige: la decisión se guarda en la cotización y la
+    venta la respeta. El monto se recalcula al vender, sobre lo realmente
+    pagado, así que el que se ve aquí es una estimación.
+    """
+    return conectar().rpc("promociones_aplicables", {
         "p_id_sede": id_sede,
         "p_monto": monto,
         "p_id_cliente": id_cliente,
@@ -429,3 +515,168 @@ def sedes_de_ferreteria(id_ferreteria: int) -> list[dict]:
         .select("id_sede, codigo, nombre, m_distritos(nombre)") \
         .eq("id_ferreteria", id_ferreteria).eq("activo", True) \
         .order("codigo").execute().data
+
+
+# ===========================================================================
+# TICKETS DEL CRM
+# Una negociación puede tener varios: el bot cierra el ticket a las 2 horas,
+# así que si el cliente vuelve al día siguiente llega con uno nuevo.
+# ===========================================================================
+
+def agregar_ticket(id_negociacion: int, ticket: str, tipo: str) -> None:
+    """Asocia un ticket a la negociación. Si ya estaba asociado, no hace nada.
+
+    tipo: 'origen' (el primero), 'seguimiento' (los siguientes) o
+          'cierre' (donde llegó el comprobante de pago).
+    """
+    conectar().table("rel_negociacion_tickets").upsert(
+        {"id_negociacion": id_negociacion, "ticket": ticket,
+         "tipo": tipo, "fecha_ticket": _ahora()},
+        on_conflict="id_negociacion,ticket",
+        ignore_duplicates=True,
+    ).execute()
+
+
+def buscar_por_ticket(ticket: str) -> list[dict]:
+    """Negociaciones asociadas a un ticket. El RLS limita a las que puedes ver."""
+    return conectar().table("rel_negociacion_tickets") \
+        .select("id_negociacion, tipo") \
+        .eq("ticket", ticket.strip()).execute().data
+
+
+# ===========================================================================
+# PROMOCIONES
+# Solo el master puede escribir: el RLS lo impone, no la pantalla.
+# ===========================================================================
+
+def promociones(incluir_inactivas: bool = True) -> list[dict]:
+    consulta = conectar().table("m_promociones").select("*")
+    if not incluir_inactivas:
+        consulta = consulta.eq("activo", True)
+    return consulta.order("vigente_hasta", desc=True).execute().data
+
+
+def promocion(id_promocion: int) -> dict | None:
+    filas = conectar().table("m_promociones").select("*") \
+        .eq("id_promocion", id_promocion).execute().data
+    return filas[0] if filas else None
+
+
+def crear_promocion(datos: dict) -> dict:
+    return conectar().table("m_promociones").insert(datos).execute().data[0]
+
+
+def actualizar_promocion(id_promocion: int, datos: dict) -> dict:
+    return conectar().table("m_promociones").update(datos) \
+        .eq("id_promocion", id_promocion).execute().data[0]
+
+
+# ------------------------------------------------------------------ tramos
+def tramos_de(id_promocion: int) -> list[dict]:
+    return conectar().table("m_promociones_tramos").select("*") \
+        .eq("id_promocion", id_promocion).order("monto_desde").execute().data
+
+
+def crear_tramo(datos: dict) -> dict:
+    return conectar().table("m_promociones_tramos").insert(datos).execute().data[0]
+
+
+def borrar_tramo(id_tramo: int) -> None:
+    conectar().table("m_promociones_tramos").delete().eq("id_tramo", id_tramo).execute()
+
+
+# ------------------------------------------------------------ alcance
+def categorias() -> list[dict]:
+    return conectar().table("m_categorias").select("*").order("nombre").execute().data
+
+
+def zonas() -> list[dict]:
+    return conectar().table("m_zonas").select("*").eq("activo", True) \
+        .order("nombre").execute().data
+
+
+def ferreterias() -> list[dict]:
+    return conectar().table("m_ferreterias").select("id_ferreteria, nombre") \
+        .eq("activo", True).order("nombre").execute().data
+
+
+def alcance_de(tabla: str, id_promocion: int) -> list[int]:
+    """Ids del alcance de una promoción (categorías, zonas o tipos de cliente)."""
+    columna = {"rel_promociones_categorias": "id_categoria",
+               "rel_promociones_zonas": "id_zona",
+               "rel_promociones_tipos_cliente": "id_tipo_cliente"}[tabla]
+    filas = conectar().table(tabla).select(columna) \
+        .eq("id_promocion", id_promocion).execute().data
+    return [f[columna] for f in filas]
+
+
+def guardar_alcance(tabla: str, id_promocion: int, ids: list[int]) -> None:
+    """Reemplaza el alcance: borra lo que había y guarda la selección nueva."""
+    columna = {"rel_promociones_categorias": "id_categoria",
+               "rel_promociones_zonas": "id_zona",
+               "rel_promociones_tipos_cliente": "id_tipo_cliente"}[tabla]
+    conectar().table(tabla).delete().eq("id_promocion", id_promocion).execute()
+    if ids:
+        conectar().table(tabla).insert(
+            [{"id_promocion": id_promocion, columna: i} for i in ids]).execute()
+
+
+# ------------------------------------------------------------ afiliación
+def afiliacion_de(codigo: str) -> list[dict]:
+    return conectar().table("v_promociones_afiliacion").select("*") \
+        .eq("promocion", codigo).order("ferreteria").execute().data
+
+
+def afiliar_ferreteria(id_promocion: int, id_ferreteria: int,
+                       acepta: bool, quien: str) -> int:
+    return conectar().rpc("afiliar_ferreteria_a_promocion", {
+        "p_id_promocion": id_promocion,
+        "p_id_ferreteria": id_ferreteria,
+        "p_acepta": acepta,
+        "p_registrado_por": quien,
+    }).execute().data
+
+
+# ------------------------------------------------------------ simulador
+def simular_beneficio(id_promocion: int, monto: float) -> float:
+    """Cuánto daría la promoción para una canasta de ese monto."""
+    valor = conectar().rpc("calcular_beneficio_promocion", {
+        "p_id_promocion": id_promocion, "p_monto": monto}).execute().data
+    return float(valor or 0)
+
+
+# ===========================================================================
+# SEGUIMIENTO
+# Los cálculos los hace la base. El RLS decide qué ve cada quien: el
+# supervisor obtiene los mismos indicadores pero solo de sus zonas.
+# ===========================================================================
+
+def _seguimiento(funcion: str, desde, hasta) -> list[dict]:
+    return conectar().rpc(funcion, {
+        "p_desde": str(desde), "p_hasta": str(hasta)
+    }).execute().data or []
+
+
+def seguimiento_resumen(desde, hasta) -> dict:
+    filas = _seguimiento("seguimiento_resumen", desde, hasta)
+    return filas[0] if filas else {}
+
+
+def seguimiento_aperturas(desde, hasta) -> list[dict]:
+    return _seguimiento("seguimiento_aperturas", desde, hasta)
+
+
+def seguimiento_asesores(desde, hasta) -> list[dict]:
+    return _seguimiento("seguimiento_asesores", desde, hasta)
+
+
+def seguimiento_zonas(desde, hasta) -> list[dict]:
+    return _seguimiento("seguimiento_zonas", desde, hasta)
+
+
+def seguimiento_perdidas(desde, hasta) -> list[dict]:
+    return _seguimiento("seguimiento_perdidas", desde, hasta)
+
+
+def seguimiento_ferreterias(desde, hasta) -> list[dict]:
+    return _seguimiento("seguimiento_ferreterias", desde, hasta)
