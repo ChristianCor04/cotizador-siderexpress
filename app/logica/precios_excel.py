@@ -12,18 +12,27 @@ La columna oculta `id_sku` es la que empareja: por eso NO debe borrarse.
 from io import BytesIO
 
 import pandas as pd
+from openpyxl.utils import get_column_letter
 
 # Columnas que la plantilla lleva siempre
 COLUMNAS_BASE = ["id_sku", "Producto", "Marca", "Unidad"]
 
+# Encabezado que se usa cuando la ferretería cotiza igual en todas sus sedes.
+# No puede coincidir con ningún código de sede.
+COLUMNA_UNICA = "PRECIO"
+
 
 def armar_plantilla(catalogo: list[dict], sedes: list[dict],
-                    precios: list[dict]) -> pd.DataFrame:
-    """Construye la tabla con una columna de precio por sede.
+                    precios: list[dict], precio_unico: bool = False) -> pd.DataFrame:
+    """Construye la tabla de precios.
 
     catalogo: [{id_sku, producto, marca, unidad}]
     sedes:    [{id_sede, codigo, nombre}]
     precios:  [{id_sede, id_sku, precio, activo}]
+
+    Con precio_unico, la tabla trae UNA sola columna de precio en vez de una
+    por sede. Sirve para las ferreterías que cotizan igual en todos sus
+    locales: se escribe una vez y al guardar se replica a todas las sedes.
     """
     por_sede_sku = {(p["id_sede"], p["id_sku"]): p
                     for p in precios if p.get("activo", True)}
@@ -36,18 +45,48 @@ def armar_plantilla(catalogo: list[dict], sedes: list[dict],
             "Marca": sku["marca"],
             "Unidad": sku.get("unidad") or "",
         }
-        for sede in sedes:
-            precio = por_sede_sku.get((sede["id_sede"], sku["id_sku"]))
-            fila[sede["codigo"]] = precio["precio"] if precio else None
+
+        if precio_unico:
+            # Se muestra el primer precio que exista entre las sedes
+            valores = [por_sede_sku[(s["id_sede"], sku["id_sku"])]["precio"]
+                       for s in sedes
+                       if (s["id_sede"], sku["id_sku"]) in por_sede_sku]
+            fila[COLUMNA_UNICA] = valores[0] if valores else None
+        else:
+            for sede in sedes:
+                precio = por_sede_sku.get((sede["id_sede"], sku["id_sku"]))
+                fila[sede["codigo"]] = precio["precio"] if precio else None
+
         filas.append(fila)
 
     tabla = pd.DataFrame(filas)
+    columnas_precio = ([COLUMNA_UNICA] if precio_unico
+                       else [s["codigo"] for s in sedes])
     # Primero los productos que la ferretería ya vende
-    columnas_precio = [s["codigo"] for s in sedes]
     tabla["_tiene"] = tabla[columnas_precio].notna().any(axis=1)
     tabla = tabla.sort_values(["_tiene", "Producto", "Marca"],
                               ascending=[False, True, True]).drop(columns="_tiene")
     return tabla.reset_index(drop=True)
+
+
+def precios_iguales_en_sedes(sedes: list[dict], precios: list[dict]) -> bool:
+    """¿Esta ferretería cotiza lo mismo en todas sus sedes?
+
+    Se usa para proponer el modo de precio único al abrir la pantalla.
+    """
+    if len(sedes) <= 1:
+        return False
+
+    ids = [s["id_sede"] for s in sedes]
+    por_sku = {}
+    for p in precios:
+        if p.get("activo", True) and p["id_sede"] in ids:
+            por_sku.setdefault(p["id_sku"], set()).add(round(float(p["precio"]), 4))
+
+    if not por_sku:
+        return True          # sin precios todavía: lo más probable es que sí
+
+    return all(len(valores) == 1 for valores in por_sku.values())
 
 
 def exportar_excel(tabla: pd.DataFrame, nombre_ferreteria: str) -> bytes:
@@ -57,12 +96,14 @@ def exportar_excel(tabla: pd.DataFrame, nombre_ferreteria: str) -> bytes:
         tabla.to_excel(writer, index=False, sheet_name="Precios")
 
         hoja = writer.sheets["Precios"]
-        # Anchos cómodos para leer
-        anchos = {"A": 10, "B": 34, "C": 22, "D": 14}
-        for letra, ancho in anchos.items():
-            hoja.column_dimensions[letra].width = ancho
-        for i in range(len(COLUMNAS_BASE), len(tabla.columns)):
-            hoja.column_dimensions[chr(ord("A") + i)].width = 14
+
+        # get_column_letter maneja cualquier cantidad de columnas. Hacer la
+        # cuenta a mano con chr() se rompe pasada la Z: la letra 27 sería "[".
+        anchos_base = [10, 34, 22, 14]        # id_sku, Producto, Marca, Unidad
+        for i, ancho in enumerate(anchos_base, start=1):
+            hoja.column_dimensions[get_column_letter(i)].width = ancho
+        for i in range(len(anchos_base) + 1, len(tabla.columns) + 1):
+            hoja.column_dimensions[get_column_letter(i)].width = 14
 
         # Encabezados en negrita y fijos al desplazar
         for celda in hoja[1]:
@@ -91,13 +132,18 @@ def leer_excel(archivo, catalogo: list[dict], sedes: list[dict]) -> dict:
 
     skus_validos = {c["id_sku"] for c in catalogo}
     nombres = {c["id_sku"]: f"{c['producto']} · {c['marca']}" for c in catalogo}
-    columnas_sede = {s["codigo"]: s["id_sede"] for s in sedes
-                     if s["codigo"] in tabla.columns}
+    # Dos formatos posibles: una columna por sede, o una sola para todas
+    if COLUMNA_UNICA in tabla.columns:
+        columnas_sede = {COLUMNA_UNICA: None}     # None = todas las sedes
+    else:
+        columnas_sede = {s["codigo"]: s["id_sede"] for s in sedes
+                         if s["codigo"] in tabla.columns}
 
     if not columnas_sede:
         raise ValueError(
             "El archivo no tiene ninguna columna de precio que coincida con "
-            f"las sedes de esta ferretería ({', '.join(s['codigo'] for s in sedes)})."
+            f"las sedes de esta ferretería ({', '.join(s['codigo'] for s in sedes)}). "
+            f"Tampoco tiene la columna «{COLUMNA_UNICA}»."
         )
 
     precios, errores = [], []
@@ -137,14 +183,18 @@ def leer_excel(archivo, catalogo: list[dict], sedes: list[dict]) -> dict:
                     f"Fila {numero}, columna {codigo}: el precio debe ser mayor a 0.")
                 continue
 
-            precios.append({
-                "id_sede": id_sede,
-                "id_sku": id_sku,
-                "precio": round(precio, 4),
-                "fuente": "relevamiento",
-                "_nombre": nombres.get(id_sku, ""),
-                "_sede": codigo,
-            })
+            # Con la columna única, el precio va a todas las sedes
+            destinos = ([s["id_sede"] for s in sedes] if id_sede is None
+                        else [id_sede])
+            for destino in destinos:
+                precios.append({
+                    "id_sede": destino,
+                    "id_sku": id_sku,
+                    "precio": round(precio, 4),
+                    "fuente": "relevamiento",
+                    "_nombre": nombres.get(id_sku, ""),
+                    "_sede": codigo,
+                })
 
     return {
         "precios": precios,

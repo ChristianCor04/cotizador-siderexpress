@@ -13,8 +13,8 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
-from reportlab.platypus import (Paragraph, SimpleDocTemplate, Spacer, Table,
-                                TableStyle)
+from reportlab.platypus import (Image, Paragraph, SimpleDocTemplate, Spacer,
+                                Table, TableStyle)
 
 ROJO = colors.HexColor("#E63946")
 GRIS = colors.HexColor("#F5F7FA")
@@ -48,11 +48,24 @@ def generar_pdf(datos: dict) -> bytes:
     titulo = ParagraphStyle("t", parent=estilos["Title"], fontSize=18,
                             textColor=ROJO, alignment=0, spaceAfter=2)
 
-    partes = [
-        Paragraph("SIDEREXPRESS", titulo),
-        Paragraph("Cotización de materiales de construcción", normal),
-        Spacer(1, 10),
-    ]
+    partes = []
+
+    # El logo va arriba. Si el archivo no está, se usa el texto como respaldo
+    # para que el PDF nunca deje de generarse.
+    logo = datos.get("logo")
+    if logo:
+        try:
+            imagen = Image(logo, width=52 * mm, height=52 * mm * 293 / 1049)
+            imagen.hAlign = "LEFT"
+            partes.append(imagen)
+            partes.append(Spacer(1, 4))
+        except Exception:
+            partes.append(Paragraph("SIDEREXPRESS", titulo))
+    else:
+        partes.append(Paragraph("SIDEREXPRESS", titulo))
+
+    partes.append(Paragraph("Cotización de materiales de construcción", normal))
+    partes.append(Spacer(1, 10))
 
     # ------------------------------------------------ datos de la cotización
     cot, cli, fer = datos["cotizacion"], datos["cliente"], datos["ferreteria"]
@@ -79,24 +92,30 @@ def generar_pdf(datos: dict) -> bytes:
     partes.append(Spacer(1, 10))
 
     # ---------------------------------------------------------------- productos
-    filas = [["Producto", "Marca", "Cant.", "P. unitario", "Subtotal"]]
+    # Marca y unidad van como Paragraph para que el texto largo ajuste solo
+    # en vez de desbordarse sobre la columna siguiente.
+    chico = ParagraphStyle("c", parent=normal, fontSize=8, leading=10)
+
+    filas = [["Producto", "Marca", "Unidad", "Cant.", "P. unitario", "Subtotal"]]
     for p in datos["productos"]:
         filas.append([
             Paragraph(escape(str(p["descripcion"])), normal),
-            escape(str(p.get("marca") or "")),
+            Paragraph(escape(str(p.get("marca") or "")), chico),
+            Paragraph(escape(str(p.get("unidad") or "")), chico),
             f"{float(p['cantidad']):,.0f}",
             _soles(p["precio"]),
             _soles(p["subtotal"]),
         ])
 
-    tabla = Table(filas, colWidths=[62 * mm, 32 * mm, 18 * mm, 29 * mm, 29 * mm],
+    tabla = Table(filas,
+                  colWidths=[48 * mm, 27 * mm, 32 * mm, 15 * mm, 26 * mm, 26 * mm],
                   repeatRows=1)
     tabla.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), ROJO),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
         ("FONTSIZE", (0, 0), (-1, -1), 9),
-        ("ALIGN", (2, 0), (-1, -1), "RIGHT"),
+        ("ALIGN", (3, 0), (-1, -1), "RIGHT"),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, GRIS]),
         ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#C9D2DC")),
         ("TOPPADDING", (0, 0), (-1, -1), 5),
@@ -109,9 +128,14 @@ def generar_pdf(datos: dict) -> bytes:
     resumen = [["Subtotal", _soles(t["subtotal"])]]
     if t.get("descuento"):
         resumen.append(["Descuento SIDEREXPRESS", "− " + _soles(t["descuento"])])
+    if t.get("flete"):
+        etiqueta = "Flete"
+        if t.get("motivo_flete"):
+            etiqueta += f" ({t['motivo_flete']})"
+        resumen.append([etiqueta, _soles(t["flete"])])
     resumen.append(["TOTAL A PAGAR", _soles(t["total"])])
 
-    tabla_tot = Table(resumen, colWidths=[60 * mm, 40 * mm], hAlign="RIGHT")
+    tabla_tot = Table(resumen, colWidths=[75 * mm, 40 * mm], hAlign="RIGHT")
     tabla_tot.setStyle(TableStyle([
         ("ALIGN", (1, 0), (1, -1), "RIGHT"),
         ("FONTSIZE", (0, 0), (-1, -1), 10),

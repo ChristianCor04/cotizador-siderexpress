@@ -953,7 +953,7 @@ def _tarjeta_venta(venta, usuario):
     detalles = [venta.get("numero_comprobante"), venta.get("tipo_comprobante")]
     st.caption(" · ".join(d for d in detalles if d) or "Sin comprobante")
 
-    if venta["estado"] == "pendiente_validacion":
+    if venta["estado"] == "pendiente_validacion de despacho":
         if usuario["rol"] in ("supervisor", "master"):
             if st.button("Validar venta", key=f"validar_{venta['id_venta']}",
                          type="primary", width="stretch"):

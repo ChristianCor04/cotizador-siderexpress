@@ -16,8 +16,9 @@ import streamlit as st
 
 import config
 import db
-from logica.precios_excel import (armar_plantilla, comparar_con_actuales,
-                                  exportar_excel, leer_excel)
+from logica.precios_excel import (COLUMNA_UNICA, armar_plantilla,
+                                  comparar_con_actuales, exportar_excel,
+                                  leer_excel, precios_iguales_en_sedes)
 
 # Colores del semáforo según hace cuánto se confirmaron los precios
 SEMAFORO = {
@@ -34,6 +35,7 @@ def _preparar_memoria():
         "precios_tabla": None,        # lo que se está editando
         "precios_version": 0,         # fuerza el refresco de la tabla
         "precios_carga": None,        # resultado del Excel cargado
+        "precio_unico": None,         # True: un solo precio para todas las sedes
     }
     for clave, valor in valores.items():
         if clave not in st.session_state:
@@ -81,6 +83,7 @@ def _lista_ferreterias(estado):
     buscar = st.text_input("Buscar ferretería", label_visibility="collapsed",
                            placeholder="Buscar ferretería")
 
+    estado = _filtros_geograficos(estado)
     solo_pendientes = st.toggle("Solo pendientes", value=False)
 
     # Agrupar las sedes por ferretería
@@ -119,8 +122,12 @@ def _lista_ferreterias(estado):
 
         with st.container(border=True):
             st.markdown(f"**{f['nombre']}**")
+            distritos = sorted({(s.get("distrito") or "").replace("_", " ")
+                                for s in f["sedes"] if s.get("distrito")})
             detalle = f"{len(f['sedes'])} sede(s) · {f['productos']} precios"
             st.caption(f"{icono} {texto} · {detalle}")
+            if distritos:
+                st.caption(" · ".join(distritos))
 
             if st.button("Abrir" if not abierta else "Abierta",
                          key=f"abrir_fer_{f['id_ferreteria']}", width="stretch",
@@ -128,8 +135,61 @@ def _lista_ferreterias(estado):
                 st.session_state.precios_ferreteria = f["id_ferreteria"]
                 st.session_state.precios_tabla = None
                 st.session_state.precios_carga = None
+                st.session_state.precio_unico = None   # se decide al abrirla
                 st.session_state.precios_version += 1
                 st.rerun()
+
+
+def _filtros_geograficos(estado):
+    """Acota la lista por departamento, provincia y distrito.
+
+    Se compara por identificador, no por nombre: los nombres traen guiones
+    bajos y tildes, y cualquier diferencia dejaría la lista vacía.
+    """
+    with st.expander("Filtrar por zona"):
+        departamentos = sorted({(e["id_departamento"], e["departamento"])
+                                for e in estado if e.get("departamento")},
+                               key=lambda x: x[1])
+        nombres_dep = [d[1] for d in departamentos]
+        dep = st.selectbox("Departamento", nombres_dep, index=None,
+                           placeholder="Todos", key="filtro_departamento")
+        id_dep = next((d[0] for d in departamentos if d[1] == dep), None)
+
+        provincias = sorted({(e["id_provincia"], e["provincia"]) for e in estado
+                             if e.get("provincia")
+                             and (id_dep is None or e["id_departamento"] == id_dep)},
+                            key=lambda x: x[1])
+        nombres_prov = [p[1] for p in provincias]
+        prov = st.selectbox("Provincia", nombres_prov, index=None,
+                            placeholder="Todas", key="filtro_provincia",
+                            disabled=not dep)
+        id_prov = next((p[0] for p in provincias if p[1] == prov), None)
+
+        distritos = sorted({(e["id_distrito"], e["distrito"]) for e in estado
+                            if e.get("distrito")
+                            and (id_prov is None or e["id_provincia"] == id_prov)
+                            and (id_dep is None or e["id_departamento"] == id_dep)},
+                           key=lambda x: x[1])
+        nombres_dist = [d[1] for d in distritos]
+        dist = st.selectbox("Distrito", nombres_dist, index=None,
+                            placeholder="Todos", key="filtro_distrito",
+                            disabled=not prov,
+                            format_func=lambda n: n.replace("_", " "))
+        id_dist = next((d[0] for d in distritos if d[1] == dist), None)
+
+    if id_dep is None:
+        return estado
+
+    filtradas = [
+        e for e in estado
+        if e.get("id_departamento") == id_dep
+        and (id_prov is None or e.get("id_provincia") == id_prov)
+        and (id_dist is None or e.get("id_distrito") == id_dist)
+    ]
+
+    if not filtradas:
+        st.caption("Ninguna ferretería en esa zona.")
+    return filtradas
 
 
 # ------------------------------------------------------------------ derecha
@@ -149,9 +209,15 @@ def _panel_ferreteria(usuario, estado):
     catalogo = db.catalogo_skus()
     precios = db.precios_de_ferreteria(id_ferreteria)
 
+    # Al abrir la ferretería se propone el modo: si hoy cotiza igual en todas
+    # sus sedes, lo más cómodo es editar un solo precio.
+    if st.session_state.precio_unico is None:
+        st.session_state.precio_unico = precios_iguales_en_sedes(sedes, precios)
+
     with st.container(border=True):
         _cabecera_panel(nombre, sedes_estado, id_ferreteria)
         st.divider()
+        _selector_modo(sedes)
         _tabla_precios(nombre, sedes, catalogo, precios)
         st.divider()
         _bloque_excel(nombre, sedes, catalogo, precios)
@@ -181,21 +247,41 @@ def _cabecera_panel(nombre, sedes_estado, id_ferreteria):
                 st.error(f"No se pudo confirmar: {e}")
 
 
+def _selector_modo(sedes):
+    """Un precio para todas las sedes, o uno por sede.
+
+    Para las ferreterías con sedes de cobertura (las que cotizan igual en
+    toda la ciudad), editar 20 columnas iguales es absurdo: se edita una.
+    """
+    if len(sedes) <= 1:
+        return
+
+    unico = st.toggle(
+        f"Mismo precio en las {len(sedes)} sedes",
+        value=bool(st.session_state.precio_unico),
+        help="Actívalo si la ferretería cotiza igual en todos sus locales. "
+             "Al guardar, el precio se escribe en todas las sedes.",
+    )
+
+    if unico != st.session_state.precio_unico:
+        st.session_state.precio_unico = unico
+        st.session_state.precios_tabla = None
+        st.session_state.precios_version += 1
+        st.rerun()
+
+    if unico:
+        st.caption("Escribes un precio y se guarda en todas las sedes.")
+
+
 def _tabla_precios(nombre, sedes, catalogo, precios):
     """Una columna de precio por sede. Se editan las celdas que haga falta."""
+    unico = bool(st.session_state.precio_unico) and len(sedes) > 1
+
     if st.session_state.precios_tabla is None:
-        st.session_state.precios_tabla = armar_plantilla(catalogo, sedes, precios)
+        st.session_state.precios_tabla = armar_plantilla(
+            catalogo, sedes, precios, precio_unico=unico)
 
     tabla = st.session_state.precios_tabla
-    columnas_sede = [s["codigo"] for s in sedes]
-
-    # Aviso si hay precios distintos entre sedes de la misma ferretería
-    if len(sedes) > 1:
-        con_precio = tabla[columnas_sede]
-        distintos = con_precio.apply(
-            lambda fila: fila.dropna().nunique() > 1, axis=1).sum()
-        if distintos:
-            st.caption(f"⚠ {distintos} producto(s) con precio diferente entre sedes.")
 
     configuracion = {
         "id_sku": None,     # oculta: es la llave, no debe editarse
@@ -203,11 +289,33 @@ def _tabla_precios(nombre, sedes, catalogo, precios):
         "Marca": st.column_config.TextColumn(disabled=True, width="medium"),
         "Unidad": st.column_config.TextColumn(disabled=True, width="small"),
     }
-    for sede in sedes:
-        configuracion[sede["codigo"]] = st.column_config.NumberColumn(
-            sede["codigo"], min_value=0.01, step=0.10, format="%.2f",
-            help=f"{sede['nombre']} · vacío = no lo vende",
+
+    if unico:
+        configuracion[COLUMNA_UNICA] = st.column_config.NumberColumn(
+            "Precio", min_value=0.01, step=0.10, format="%.2f",
+            help=f"Se guarda en las {len(sedes)} sedes · vacío = no lo vende",
         )
+        # Aviso: al guardar se pisan los precios distintos que hubiera
+        distintos = _productos_con_precio_distinto(sedes, precios)
+        if distintos:
+            st.warning(
+                f"{distintos} producto(s) tienen hoy precios distintos entre "
+                "sedes. Al guardar en este modo, todas quedarán con el mismo "
+                "precio. Apaga el interruptor si quieres conservarlos."
+            )
+    else:
+        columnas_sede = [s["codigo"] for s in sedes]
+        if len(sedes) > 1:
+            distintos = tabla[columnas_sede].apply(
+                lambda fila: fila.dropna().nunique() > 1, axis=1).sum()
+            if distintos:
+                st.caption(f"⚠ {distintos} producto(s) con precio diferente entre sedes.")
+
+        for sede in sedes:
+            configuracion[sede["codigo"]] = st.column_config.NumberColumn(
+                sede["codigo"], min_value=0.01, step=0.10, format="%.2f",
+                help=f"{sede['nombre']} · vacío = no lo vende",
+            )
 
     editada = st.data_editor(
         tabla, key=f"tabla_precios_{st.session_state.precios_version}",
@@ -215,7 +323,7 @@ def _tabla_precios(nombre, sedes, catalogo, precios):
         num_rows="fixed", height=360,
     )
 
-    cambios = _detectar_cambios(tabla, editada, sedes)
+    cambios = _detectar_cambios(tabla, editada, sedes, unico)
 
     col_info, col_botones = st.columns([2, 1])
     col_info.caption(f"{len(cambios)} precio(s) modificado(s) sin guardar"
@@ -236,26 +344,43 @@ def _tabla_precios(nombre, sedes, catalogo, precios):
                 st.error(f"No se pudo guardar: {e}")
 
 
-def _detectar_cambios(original, editada, sedes) -> list[dict]:
-    """Compara la tabla antes y después de editarla."""
+def _productos_con_precio_distinto(sedes, precios) -> int:
+    ids = [s["id_sede"] for s in sedes]
+    por_sku = {}
+    for p in precios:
+        if p.get("activo", True) and p["id_sede"] in ids:
+            por_sku.setdefault(p["id_sku"], set()).add(round(float(p["precio"]), 4))
+    return sum(1 for valores in por_sku.values() if len(valores) > 1)
+
+
+def _detectar_cambios(original, editada, sedes, unico=False) -> list[dict]:
+    """Compara la tabla antes y después de editarla.
+
+    En modo único, cada precio editado genera una línea por sede: así la
+    ferretería queda con el mismo precio en todos sus locales.
+    """
     cambios = []
-    por_sede = {s["codigo"]: s["id_sede"] for s in sedes}
+    columnas = ({COLUMNA_UNICA: None} if unico
+                else {s["codigo"]: s["id_sede"] for s in sedes})
 
     for i in range(len(editada)):
         id_sku = int(editada.iloc[i]["id_sku"])
-        for codigo, id_sede in por_sede.items():
-            antes = original.iloc[i][codigo]
-            ahora = editada.iloc[i][codigo]
+        for columna, id_sede in columnas.items():
+            antes = original.iloc[i][columna]
+            ahora = editada.iloc[i][columna]
 
             if pd.isna(ahora):
                 continue                      # vaciar no borra: se hace con reemplazar
             if pd.isna(antes) or round(float(antes), 4) != round(float(ahora), 4):
-                cambios.append({
-                    "id_sede": id_sede,
-                    "id_sku": id_sku,
-                    "precio": round(float(ahora), 4),
-                    "fuente": "asesor",
-                })
+                destinos = ([s["id_sede"] for s in sedes] if id_sede is None
+                            else [id_sede])
+                for destino in destinos:
+                    cambios.append({
+                        "id_sede": destino,
+                        "id_sku": id_sku,
+                        "precio": round(float(ahora), 4),
+                        "fuente": "asesor",
+                    })
     return cambios
 
 
@@ -265,8 +390,10 @@ def _bloque_excel(nombre, sedes, catalogo, precios):
 
     col_bajar, col_subir = st.columns(2)
 
+    unico = bool(st.session_state.precio_unico) and len(sedes) > 1
+
     with col_bajar:
-        plantilla = armar_plantilla(catalogo, sedes, precios)
+        plantilla = armar_plantilla(catalogo, sedes, precios, precio_unico=unico)
         st.download_button(
             "⬇ Descargar plantilla",
             data=exportar_excel(plantilla, nombre),
@@ -275,6 +402,9 @@ def _bloque_excel(nombre, sedes, catalogo, precios):
             width="stretch",
             help="Viene con los precios actuales. Solo edita las columnas de precio.",
         )
+        if unico:
+            st.caption("La plantilla trae una sola columna «PRECIO» que se "
+                       "aplicará a todas las sedes.")
 
     with col_subir:
         archivo = st.file_uploader("Subir archivo", type=["xlsx"],

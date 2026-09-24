@@ -7,8 +7,13 @@ Este archivo hace dos cosas:
 
 Si quieres cambiar cómo se comporta la app, empieza mirando aquí.
 """
+from pathlib import Path
+
 import streamlit as st
 from supabase import create_client
+
+# Logo de la marca. Para cambiarlo, reemplaza el archivo manteniendo el nombre.
+LOGO = str(Path(__file__).parent / "assets" / "logo.png")
 
 
 # ---------------------------------------------------------------------------
@@ -69,3 +74,40 @@ def conectar():
             st.stop()
         st.session_state.supabase = create_client(url, key)
     return st.session_state.supabase
+
+
+# ---------------------------------------------------------------------------
+# FECHAS EN HORA DE PERÚ
+# El servidor trabaja en UTC. Sin esto, las fechas saldrían 5 horas adelante.
+# ---------------------------------------------------------------------------
+from datetime import datetime          # noqa: E402
+from zoneinfo import ZoneInfo          # noqa: E402
+
+LIMA = ZoneInfo("America/Lima")
+
+
+def ahora_lima() -> datetime:
+    return datetime.now(LIMA)
+
+
+def a_lima(valor) -> datetime | None:
+    """Convierte a hora de Lima una fecha que viene de la base (en UTC)."""
+    if valor is None:
+        return None
+    if isinstance(valor, str):
+        valor = datetime.fromisoformat(valor.replace("Z", "+00:00"))
+    return valor.astimezone(LIMA)
+
+
+def fecha_hora(valor) -> str:
+    fecha = a_lima(valor)
+    return fecha.strftime("%d/%m/%Y %H:%M") if fecha else "—"
+
+
+def vence_texto(valor) -> str:
+    """La cotización vence a la medianoche: se muestra como 23:59 del día anterior."""
+    fecha = a_lima(valor)
+    if fecha is None:
+        return "—"
+    from datetime import timedelta
+    return (fecha - timedelta(minutes=1)).strftime("%d/%m/%Y 23:59")

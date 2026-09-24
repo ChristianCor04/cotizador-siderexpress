@@ -4,6 +4,7 @@ PANTALLA DE LOGIN
 """
 import streamlit as st
 
+import config
 import db
 import sesion
 
@@ -14,10 +15,10 @@ def mostrar():
 
     with centro:
         with st.container(border=True):
+            izq_logo, centro_logo, der_logo = st.columns([1, 3, 1])
+            centro_logo.image(config.LOGO, width="stretch")
             st.markdown(
-                "<h2 style='text-align:center;margin-bottom:0'>SIDER"
-                "<span style='color:#E63946'>EXPRESS</span></h2>"
-                "<p style='text-align:center;color:#5B6B7F;margin-top:4px'>Cotizador comercial</p>",
+                "<p style='text-align:center;margin-top:-6px'>Cotizador comercial</p>",
                 unsafe_allow_html=True,
             )
 

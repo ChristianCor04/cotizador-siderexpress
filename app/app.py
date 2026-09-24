@@ -11,17 +11,21 @@ import streamlit as st
 
 st.set_page_config(page_title="Cotizador SIDEREXPRESS", page_icon="🧱", layout="wide")
 
+import config                                # noqa: E402
 import db                                    # noqa: E402
 import sesion                                # noqa: E402
-from paginas import login, negociaciones, precios  # noqa: E402
+from paginas import (login, negociaciones, precios,  # noqa: E402
+                     promociones, seguimiento)
 
 
 # Qué pantallas ve cada rol.
 # Para agregar una pantalla nueva: créala en paginas/ y agrégala aquí.
 MENU = {
-    "asesor":     ["Negociaciones", "Precios", "Ferreterías", "Clientes"],
-    "supervisor": ["Negociaciones", "Precios", "Ferreterías", "Clientes"],
-    "master":     ["Negociaciones", "Precios", "Ferreterías", "Clientes", "Promociones"],
+    "asesor":     ["Negociaciones", "Precios"],
+    "supervisor": ["Negociaciones", "Seguimiento", "Precios",
+                   "Ferreterías", "Clientes"],
+    "master":     ["Negociaciones", "Seguimiento", "Precios",
+                   "Ferreterías", "Clientes", "Promociones"],
 }
 
 
@@ -43,9 +47,19 @@ def main():
     usuario = st.session_state.usuario
 
     # --- Menú lateral
+    # st.logo lo muestra arriba de la barra lateral y también cuando está
+    # colapsada, así que no hace falta repetirlo con st.image.
+    st.logo(config.LOGO, size="large")
+
     with st.sidebar:
-        st.markdown("### SIDER:red[EXPRESS]")
         st.caption(f"{usuario['nombre']} · {usuario['rol']}")
+
+        # Un usuario puede cubrir varias zonas: conviene que vea cuáles
+        zonas = [(z.get("m_zonas") or {}).get("nombre")
+                 for z in (usuario.get("rel_usuarios_zonas") or [])]
+        zonas = sorted(z for z in zonas if z)
+        if zonas:
+            st.caption("Zonas: " + ", ".join(zonas))
         st.divider()
 
         opciones = MENU.get(usuario["rol"], ["Negociaciones"])
@@ -63,6 +77,10 @@ def main():
         negociaciones.mostrar(usuario)
     elif pantalla == "Precios":
         precios.mostrar(usuario)
+    elif pantalla == "Promociones":
+        promociones.mostrar(usuario)
+    elif pantalla == "Seguimiento":
+        seguimiento.mostrar(usuario)
     else:
         st.info(f"La pantalla «{pantalla}» todavía no está construida.")
 

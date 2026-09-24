@@ -1,6 +1,7 @@
+# Tema oscuro. Para cambiar los colores, edita aquí y reinicia la app.
 [theme]
-base = "light"
-primaryColor = "#E63946"
-backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#F5F7FA"
-textColor = "#1A2433"
+base = "dark"
+primaryColor = "#FF3B30"            # rojo de la marca, suavizado para fondo oscuro
+backgroundColor = "#16181D"         # gris muy oscuro, no negro puro: cansa menos
+secondaryBackgroundColor = "#21252D"  # tarjetas y barra lateral
+textColor = "#E8EAED"

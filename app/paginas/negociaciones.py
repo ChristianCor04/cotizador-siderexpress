@@ -45,6 +45,13 @@ VALORES_INICIALES = {
     # Cuando el cliente no pasa ubicación exacta, se elige a mano
     "id_distrito": None,
     "id_provincia": None,
+    # Ticket del CRM de la conversación actual con el cliente
+    "ticket_actual": None,
+    # Negociación viva que impide crear otra para el mismo cliente
+    "negociacion_bloqueante": None,
+    # Flete: solo se cobra cuando la entrega lo exige
+    "flete_monto": 0.0,
+    "flete_motivo": "",
 }
 
 
@@ -55,9 +62,16 @@ def _preparar_memoria():
 
 
 def _limpiar_resultados():
-    """Los montos quedan viejos si cambian materiales o ubicación."""
+    """Los montos quedan viejos si cambian materiales o ubicación.
+
+    También se descarta el PDF generado: pertenecía a la cotización anterior
+    y descargarlo después llevaría a enviar un documento equivocado.
+    """
     st.session_state.resultados = []
     st.session_state.sede_elegida = None
+    st.session_state.pdf_generado = None
+    st.session_state.flete_monto = 0.0
+    st.session_state.flete_motivo = ""
 
 
 # ===========================================================================
@@ -67,7 +81,7 @@ def _limpiar_resultados():
 def mostrar(usuario: dict):
     _preparar_memoria()
 
-    col_lista, col_centro, col_ferreterias = st.columns([1.1, 2, 1.6], gap="medium")
+    col_lista, col_centro, col_ferreterias = st.columns([1, 2.3, 1.4], gap="medium")
 
     with col_lista:
         _bloque_lista(usuario)
@@ -78,11 +92,17 @@ def mostrar(usuario: dict):
 
 
 # ---------------------------------------------------------------- columna 1
+def _tickets_de(neg) -> list[dict]:
+    """Tickets de la negociación, del más reciente al más antiguo."""
+    tickets = (neg or {}).get("rel_negociacion_tickets") or []
+    return sorted(tickets, key=lambda t: t.get("fecha_ticket") or "", reverse=True)
+
+
 def _bloque_lista(usuario):
     st.markdown("##### Negociaciones")
 
     buscar = st.text_input(
-        "Buscar", placeholder="Teléfono o N° cotización",
+        "Buscar", placeholder="ID CRM, teléfono o N° cotización",
         label_visibility="collapsed", key="buscador",
     )
     if st.button("＋ Nueva negociación", width="stretch"):
@@ -125,6 +145,11 @@ def _tarjeta_negociacion(neg):
         distrito = (neg.get("m_distritos") or {}).get("nombre") or neg.get("distrito_texto") or ""
         st.caption(f"{etiqueta} · {distrito}" if etiqueta else distrito)
 
+        tickets = _tickets_de(neg)
+        if tickets:
+            extra = f" (+{len(tickets) - 1})" if len(tickets) > 1 else ""
+            st.caption(f"ID CRM {tickets[0]['ticket']}{extra}")
+
         if st.button("Abrir" if not activa else "Abierta", key=f"abrir_{neg['id_negociacion']}",
                      width="stretch", type="primary" if activa else "secondary",
                      disabled=activa):
@@ -137,6 +162,11 @@ def _abrir_negociacion(neg):
     st.session_state.modo_nuevo = False
     st.session_state.id_distrito = neg.get("id_distrito")
     st.session_state.id_provincia = None
+    # Se propone el ticket más reciente: es el caso común si el asesor sigue
+    # en la misma conversación. Si el cliente volvió por otra, lo cambia.
+    tickets = _tickets_de(neg)
+    st.session_state.ticket_actual = tickets[0]["ticket"] if tickets else None
+    st.session_state.negociacion_bloqueante = None
     _limpiar_resultados()
 
     # Cargar la última cotización, si existe
@@ -147,6 +177,7 @@ def _abrir_negociacion(neg):
         st.session_state.materiales = [{
             "producto": d["producto"],
             "marca": d["marca"],
+            "unidad": d.get("unidad_nombre"),
             "cantidad": d["cantidad"],
             "precio_negociado": d["precio_modificado"],
             "motivo": d["motivo_modificacion"],
@@ -172,27 +203,53 @@ def _empezar_nueva():
     st.session_state.modo_nuevo = True
     st.session_state.id_distrito = None
     st.session_state.id_provincia = None
+    st.session_state.ticket_actual = None
+    st.session_state.negociacion_bloqueante = None
+    st.session_state.cotizacion_actual = None
     st.session_state.version_tabla += 1
     _limpiar_resultados()
     st.rerun()
 
 
 def _buscar(texto):
+    """Busca por ticket, número de cotización o teléfono, en ese orden.
+
+    Un mismo texto puede ser varias cosas (un ticket numérico se parece a un
+    número de cotización), así que se prueban las tres y se muestran todas
+    las coincidencias.
+    """
     texto = texto.strip()
-    # Si son solo números y es corto, se asume número de cotización
+    encontradas = {}          # id_negociacion -> cómo se encontró
+
+    for fila in db.buscar_por_ticket(texto):
+        encontradas.setdefault(fila["id_negociacion"], f"ID CRM {texto}")
+
     if texto.isdigit() and len(texto) <= 7:
-        encontrado = db.buscar_por_codigo_cotizacion(int(texto))
-        if encontrado:
-            st.success(f"Cotización en {config.codigo_negociacion(encontrado['id_negociacion'])}")
-        else:
-            st.warning("No se encontró esa cotización.")
-        return
+        cotizacion = db.buscar_por_codigo_cotizacion(int(texto))
+        if cotizacion:
+            encontradas.setdefault(
+                cotizacion["id_negociacion"],
+                f"cotización {config.codigo_cotizacion(int(texto))}")
 
     cliente = db.buscar_cliente_por_telefono(texto)
-    if cliente:
-        st.success(f"Cliente: {cliente['nombre']}")
-    else:
+
+    if not encontradas and not cliente:
         st.warning("Sin resultados. Usa ＋ para crear una negociación nueva.")
+        return
+
+    for id_negociacion, motivo in encontradas.items():
+        codigo = config.codigo_negociacion(id_negociacion)
+        if st.button(f"Abrir {codigo} · {motivo}", key=f"buscar_abrir_{id_negociacion}",
+                     width="stretch"):
+            neg = db.negociacion_por_id(id_negociacion)
+            if neg:
+                _abrir_negociacion(neg)
+            else:
+                st.error("No tienes acceso a esa negociación.")
+
+    if cliente:
+        st.info(f"Cliente registrado: **{cliente.get('nombre') or 'sin nombre'}**. "
+                "Si no ves su negociación en la lista, crea una nueva con ＋.")
 
 
 # ---------------------------------------------------------------- columna 2
@@ -202,6 +259,8 @@ def _bloque_cliente_y_materiales(usuario):
         return
 
     with st.container(border=True):
+        _bloque_ticket()
+        st.divider()
         _datos_cliente(usuario)
         st.divider()
         _ubicacion()
@@ -212,16 +271,78 @@ def _bloque_cliente_y_materiales(usuario):
         _bloque_venta(usuario)
 
 
+def _aviso_negociacion_abierta():
+    """Mensaje cuando el cliente buscado ya tiene una negociación viva."""
+    abierta = st.session_state.get("negociacion_bloqueante")
+    if not abierta:
+        return
+
+    codigo = config.codigo_negociacion(abierta["id_negociacion"])
+    detalle = f"{codigo} · {abierta['asesor']} · desde {config.fecha_hora(abierta['fecha_inicio'])}"
+
+    st.error(
+        f"Este cliente ya tiene una negociación activa ({detalle}). "
+        "Para poder crear una nueva negociación debe dar por finalizada la anterior."
+    )
+
+    if abierta.get("es_mia"):
+        if st.button(f"Abrir {codigo}", key="abrir_bloqueante", width="stretch"):
+            neg = db.negociacion_por_id(abierta["id_negociacion"])
+            st.session_state.negociacion_bloqueante = None
+            if neg:
+                _abrir_negociacion(neg)
+    else:
+        st.caption("La atiende otro asesor. Coordina con él antes de continuar.")
+
+
+def _bloque_ticket():
+    """El ID CRM identifica la conversación con el cliente.
+
+    Va arriba porque es lo primero que tiene el asesor: el ID llega del CRM
+    y desde ahí abre la cotización.
+
+    En el código y en la base sigue llamándose "ticket"; «ID CRM» es solo
+    cómo se muestra en pantalla.
+    """
+    tickets = _tickets_de(st.session_state.negociacion)
+    registrados = [t["ticket"] for t in tickets]
+
+    col_ticket, col_info = st.columns([1.2, 2], vertical_alignment="bottom")
+    ticket = col_ticket.text_input(
+        "ID CRM *", value=st.session_state.ticket_actual or "",
+        placeholder="Ej. 458213", key=f"ticket_{st.session_state.version_tabla}",
+        help="Identifica la conversación del cliente en el CRM. "
+             "Es obligatorio para generar la cotización.",
+    )
+    st.session_state.ticket_actual = ticket.strip() or None
+
+    with col_info:
+        if registrados:
+            st.caption("ID CRM de esta negociación: " + ", ".join(registrados))
+        if ticket.strip() and registrados and ticket.strip() not in registrados:
+            st.caption(":orange[ID CRM nuevo: se agregará como seguimiento "
+                       "al generar la cotización.]")
+
+
 def _datos_cliente(usuario):
     cliente = st.session_state.cliente
 
     if cliente is None:
+        _aviso_negociacion_abierta()
         st.markdown("##### Cliente nuevo")
         telefono = st.text_input("Teléfono", placeholder="+51987654321", key="tel_nuevo")
         if st.button("Buscar cliente", key="btn_buscar_cliente"):
             encontrado = db.buscar_cliente_por_telefono(telefono.strip())
             if encontrado:
-                st.session_state.cliente = encontrado
+                # Antes de adoptarlo, se revisa que no tenga otra negociación
+                # viva: la base lo impide y es mejor avisar aquí.
+                abierta = db.negociacion_abierta_de(encontrado["id_cliente"])
+                if abierta:
+                    st.session_state.cliente = None
+                    st.session_state.negociacion_bloqueante = abierta
+                else:
+                    st.session_state.negociacion_bloqueante = None
+                    st.session_state.cliente = encontrado
                 st.rerun()
             else:
                 st.info("Cliente nuevo. Completa sus datos abajo.")
@@ -230,27 +351,156 @@ def _datos_cliente(usuario):
         return
 
     tipo = cliente.get("m_tipos_cliente") or {}
-    st.markdown(f"##### {cliente.get('nombre') or 'Cliente nuevo'}")
-    st.caption(f"{cliente.get('telefono','')} · {tipo.get('segmento','')} {tipo.get('nombre','')}")
+    col_nombre, col_cerrar = st.columns([3, 1], vertical_alignment="center")
+    col_nombre.markdown(f"##### {cliente.get('nombre') or 'Cliente nuevo'}")
 
-    with st.expander("Editar datos del cliente"):
+    detalle = [cliente.get("telefono", ""),
+               f"{tipo.get('segmento','')} {tipo.get('nombre','')}".strip()]
+    documento = _documento_texto(cliente)
+    if documento:
+        detalle.append(documento)
+    col_nombre.caption(" · ".join(d for d in detalle if d))
+
+    with col_cerrar:
+        _boton_cerrar_negociacion()
+
+    # Se abre solo si al cliente le falta el nombre: así el asesor ve de
+    # entrada lo que tiene que completar.
+    with st.expander("Editar datos del cliente",
+                     expanded=not (cliente.get("nombre") or "").strip()):
         nombre = st.text_input("Nombre", value=cliente.get("nombre") or "")
+
         tipos = db.tipos_cliente()
         etiquetas = [f"{t['segmento']} · {t['nombre']}" for t in tipos]
         actual = next((i for i, t in enumerate(tipos)
                        if t["id_tipo_cliente"] == cliente.get("id_tipo_cliente")), None)
-        elegido = st.selectbox("Tipo de cliente", etiquetas, index=actual, placeholder="Selecciona")
+        elegido = st.selectbox("Tipo de cliente", etiquetas, index=actual,
+                               placeholder="Selecciona")
+
+        # Documento: opcional. El asesor puede seguir sin llenarlo, pero si lo
+        # llena se valida el formato para que no entre basura a la base.
+        col_tipo_doc, col_num_doc = st.columns([1, 1.6])
+        tipos_doc = ["DNI", "RUC", "CE", "PASAPORTE"]
+        indice_doc = (tipos_doc.index(cliente["tipo_documento"])
+                      if cliente.get("tipo_documento") in tipos_doc else None)
+        tipo_documento = col_tipo_doc.selectbox(
+            "Tipo de documento", tipos_doc, index=indice_doc,
+            placeholder="Opcional", key="sel_tipo_doc",
+        )
+        numero_documento = col_num_doc.text_input(
+            "N° de documento", value=cliente.get("numero_documento") or "",
+            placeholder="Opcional", key="num_doc",
+        )
+        st.caption("El documento no es obligatorio para cotizar, pero sale en el PDF.")
 
         if st.button("Guardar cliente"):
+            error = _validar_documento(tipo_documento, numero_documento)
+            if error:
+                st.error(error)
+                return
+
             datos = {"nombre": nombre}
             if elegido:
                 datos["id_tipo_cliente"] = tipos[etiquetas.index(elegido)]["id_tipo_cliente"]
-            if cliente.get("id_cliente"):
-                st.session_state.cliente = db.actualizar_cliente(cliente["id_cliente"], datos)
-            else:
-                datos["telefono"] = cliente["telefono"]
-                st.session_state.cliente = db.crear_cliente(datos)
+
+            # Se envían siempre los dos campos: así también se puede borrar
+            # un documento cargado por error.
+            datos["tipo_documento"] = tipo_documento or None
+            datos["numero_documento"] = numero_documento.strip() or None
+
+            try:
+                if cliente.get("id_cliente"):
+                    st.session_state.cliente = db.actualizar_cliente(
+                        cliente["id_cliente"], datos)
+                else:
+                    datos["telefono"] = cliente["telefono"]
+                    st.session_state.cliente = db.crear_cliente(datos)
+            except Exception as e:
+                st.error(_error_cliente(e))
+                return
+
             st.success("Guardado.")
+            st.rerun()
+
+
+def _documento_texto(cliente) -> str:
+    """Documento en una línea, si el cliente lo tiene."""
+    tipo = cliente.get("tipo_documento")
+    numero = cliente.get("numero_documento")
+    return f"{tipo} {numero}" if tipo and numero else ""
+
+
+def _validar_documento(tipo, numero) -> str | None:
+    """Revisa el documento antes de guardarlo. Devuelve el error o None.
+
+    Los dos campos son opcionales, pero si se llena uno hay que llenar el
+    otro: la base no acepta un tipo sin número ni al revés.
+    """
+    numero = (numero or "").strip()
+
+    if not tipo and not numero:
+        return None
+    if tipo and not numero:
+        return f"Escribe el número de {tipo} o deja vacío el tipo de documento."
+    if numero and not tipo:
+        return "Elige el tipo de documento o borra el número."
+
+    if tipo == "DNI" and not (numero.isdigit() and len(numero) == 8):
+        return "El DNI debe tener 8 dígitos."
+    if tipo == "RUC" and not (numero.isdigit() and len(numero) == 11):
+        return "El RUC debe tener 11 dígitos."
+    return None
+
+
+def _error_cliente(e) -> str:
+    """Traduce los errores de la base a algo entendible."""
+    detalle = str(e)
+    if "uq_cliente_documento" in detalle:
+        return "Ese documento ya está registrado en otro cliente."
+    if "chk_cliente_dni" in detalle:
+        return "El DNI debe tener 8 dígitos."
+    if "chk_cliente_ruc" in detalle:
+        return "El RUC debe tener 11 dígitos."
+    if "uq_cliente_telefono" in detalle:
+        return "Ese teléfono ya está registrado en otro cliente."
+    return f"No se pudo guardar: {e}"
+
+
+def _boton_cerrar_negociacion():
+    """Cierra la negociación como perdida, pidiendo el motivo.
+
+    No aparece si la negociación ya está ganada o si todavía no existe.
+    """
+    negociacion = st.session_state.negociacion
+    if not negociacion or negociacion.get("estado") == "ganada":
+        return
+
+    with st.popover("Cerrar", width="stretch",
+                    help="Dar por finalizada esta negociación"):
+        motivos = db.motivos_perdida()
+        if not motivos:
+            st.caption("No hay motivos configurados en m_motivos_perdida.")
+            return
+
+        nombres = [m["nombre"] for m in motivos]
+        elegido = st.selectbox("¿Por qué se cierra?", nombres, index=None,
+                               placeholder="Elige el motivo", key="motivo_cierre")
+
+        st.caption("La negociación queda como perdida y sus cotizaciones, rechazadas.")
+
+        if st.button("Confirmar cierre", type="primary", width="stretch",
+                     disabled=not elegido, key="btn_confirmar_cierre"):
+            id_motivo = motivos[nombres.index(elegido)]["id_motivo_perdida"]
+            try:
+                db.cerrar_negociacion(negociacion["id_negociacion"], id_motivo)
+            except Exception as e:
+                st.error(f"No se pudo cerrar: {e}")
+                return
+            st.session_state.negociacion = None
+            st.session_state.cliente = None
+            st.session_state.materiales = []
+            st.session_state.version_tabla += 1
+            _limpiar_resultados()
             st.rerun()
 
 
@@ -362,12 +612,13 @@ def _lista_materiales():
 
 
 def _barra_agregar(catalogo):
-    """Producto, marca y cantidad. Al agregar, la barra se vacía sola."""
+    """Producto, marca, unidad y cantidad. Al agregar, la barra se vacía sola."""
     productos = sorted({c["producto"] for c in catalogo})
     version = st.session_state.version_tabla
 
     with st.container(border=True):
-        col_prod, col_marca, col_cant, col_boton = st.columns([2.4, 1.5, 0.9, 1])
+        col_prod, col_marca, col_unidad, col_cant, col_boton = \
+            st.columns([2.2, 1.3, 1.2, 0.8, 1])
 
         producto = col_prod.selectbox(
             "Producto", productos, index=None, placeholder="Escribe para buscar…",
@@ -383,16 +634,66 @@ def _barra_agregar(catalogo):
             help="Vacío = se toma la más barata de cada ferretería.",
         )
 
+        # La unidad depende del producto (y de la marca, si la eligió).
+        # Casi siempre hay una sola: en ese caso se muestra como dato, no como
+        # lista. Un desplegable con una sola opción conservaría el valor vacío
+        # que tenía antes de elegir el producto.
+        # Las unidades se ordenan por cobertura: primero la que más
+        # ferreterías cotizan. Una unidad sin precios se puede elegir, pero
+        # la lista avisa que nadie la cotiza.
+        cobertura = {}
+        for c in catalogo:
+            if c["producto"] != producto:
+                continue
+            if marca and c["marca"] != marca:
+                continue
+            nombre = c["unidad_nombre"]
+            cobertura[nombre] = cobertura.get(nombre, 0) + (c.get("n_sedes") or 0)
+
+        unidades = sorted(cobertura, key=lambda u: (-cobertura[u], u)) if producto else []
+
+        if len(unidades) == 1:
+            unidad = unidades[0]
+            col_unidad.markdown(
+                "<div style='font-size:0.8rem;opacity:.7;margin-bottom:2px'>Unidad</div>"
+                f"<div style='padding:7px 0'>{unidad}</div>",
+                unsafe_allow_html=True,
+            )
+        elif len(unidades) > 1:
+            def _etiqueta_unidad(nombre):
+                sedes = cobertura.get(nombre, 0)
+                if sedes == 0:
+                    return f"{nombre} · sin precios"
+                return f"{nombre} · {sedes} ferretería{'s' if sedes != 1 else ''}"
+
+            unidad = col_unidad.selectbox(
+                "Unidad", unidades, index=0,
+                format_func=_etiqueta_unidad,
+                key=f"nueva_unidad_{version}_{producto}_{marca or ''}",
+                help="Cada unidad tiene su propio precio. Si la ferretería no "
+                     "cotiza en esa unidad, no compite por esa línea.",
+            )
+        else:
+            unidad = None
+            col_unidad.markdown(
+                "<div style='font-size:0.8rem;opacity:.7;margin-bottom:2px'>Unidad</div>"
+                "<div style='padding:7px 0;opacity:.5'>—</div>",
+                unsafe_allow_html=True,
+            )
+
         cantidad = col_cant.number_input(
             "Cant.", min_value=0.01, step=1.0, value=1.0, format="%.2f",
             key=f"nueva_cantidad_{version}",
         )
 
         col_boton.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-        if col_boton.button("＋ Agregar", width="stretch", disabled=not producto):
+        falta_unidad = bool(unidades) and unidad is None
+        if col_boton.button("＋ Agregar", width="stretch",
+                            disabled=not producto or falta_unidad):
             st.session_state.materiales.append({
                 "producto": producto,
                 "marca": marca,
+                "unidad": unidad,
                 "cantidad": float(cantidad),
                 "precio_negociado": None,
                 "motivo": None,
@@ -406,7 +707,7 @@ def _barra_agregar(catalogo):
 
 def _encabezado_lista():
     cols = st.columns([2.4, 1.4, 0.8, 1.1, 0.4])
-    etiquetas = ["Producto", "Marca", "Cantidad", "Precio negociado", ""]
+    etiquetas = ["Producto", "Marca y unidad", "Cant.", "Precio neg.", ""]
     for col, etiqueta in zip(cols, etiquetas):
         col.caption(etiqueta)
 
@@ -417,7 +718,10 @@ def _fila_material(indice, item):
         st.columns([2.4, 1.4, 0.8, 1.1, 0.4], vertical_alignment="center")
 
     col_prod.markdown(item["producto"])
-    col_marca.caption(item["marca"] or "La más barata")
+    detalle = [item.get("marca") or "La más barata"]
+    if item.get("unidad"):
+        detalle.append(item["unidad"])
+    col_marca.caption(" · ".join(detalle))
 
     cantidad = col_cant.number_input(
         "Cantidad", min_value=0.01, step=1.0, value=float(item["cantidad"]),
@@ -493,6 +797,7 @@ def _armar_lineas(catalogo) -> tuple[list[dict], list[str]]:
     for i, item in enumerate(st.session_state.materiales, start=1):
         producto = item.get("producto")
         marca = item.get("marca")
+        unidad = item.get("unidad")
         cantidad = item.get("cantidad")
 
         if not producto:
@@ -525,11 +830,22 @@ def _armar_lineas(catalogo) -> tuple[list[dict], list[str]]:
                 )
                 continue
 
+        if unidad:
+            por_unidad = [c for c in opciones if c["unidad_nombre"] == unidad]
+            if not por_unidad:
+                errores.append(
+                    f"Fila {i}: {producto} no está registrado en {unidad}.")
+                continue
+            opciones = por_unidad
+
         lineas.append({
             "id_producto": opciones[0]["id_producto"],
-            "descripcion": producto + (f" · {marca}" if marca else ""),
+            "descripcion": producto
+                           + (f" · {marca}" if marca else "")
+                           + (f" · {unidad}" if unidad else ""),
             "producto": producto,
             "marca": marca,
+            "unidad": unidad,
             "cantidad": float(cantidad),
             "precio_manual": float(precio_negociado) if precio_negociado else None,
             "motivo": (item.get("motivo") or "").strip() or None,
@@ -631,6 +947,8 @@ def _recotizar():
 def _bloque_ferreterias(usuario):
     st.markdown("##### Ferreterías")
 
+    _tarjeta_ultima_cotizacion()
+
     resultados = st.session_state.resultados
     if not resultados:
         st.info("Arma la lista de materiales y presiona «Buscar ferreterías».")
@@ -660,6 +978,33 @@ def _bloque_ferreterias(usuario):
         _resumen_y_pdf(usuario)
 
 
+def _tarjeta_ultima_cotizacion():
+    """Con qué ferretería y por cuánto se cotizó la última vez.
+
+    Se comprueba que pertenezca a la negociación abierta: si no, al crear una
+    negociación nueva seguiría mostrando la cotización de la anterior.
+    """
+    ultima = st.session_state.cotizacion_actual
+    if not ultima:
+        return
+
+    actual = (st.session_state.negociacion or {}).get("id_negociacion")
+    if ultima.get("id_negociacion") != actual:
+        st.session_state.cotizacion_actual = None
+        return
+
+    with st.container(border=True):
+        st.caption(f"Última cotización · {config.codigo_cotizacion(ultima['id_cotizacion'])} "
+                   f"v{ultima['version']}")
+        st.markdown(f"**{ultima.get('ferreteria') or 'Ferretería no registrada'}** · "
+                    f"{config.soles(ultima.get('monto_total_sol'))}")
+        detalles = []
+        if ultima.get("sede_codigo"):
+            detalles.append(ultima["sede_codigo"])
+        detalles.append(f"vence {config.vence_texto(ultima.get('fecha_vencimiento'))}")
+        st.caption(" · ".join(detalles))
+
+
 def _tarjeta_ferreteria(r):
     elegida = st.session_state.sede_elegida == r["id_sede"]
 
@@ -668,6 +1013,10 @@ def _tarjeta_ferreteria(r):
         izq.markdown(f"**{r['ferreteria']}**")
         izq.caption(r["sede"])
         der.markdown(f"**{config.soles(r['monto'])}**")
+
+        ultima = st.session_state.cotizacion_actual or {}
+        if ultima.get("id_sede") == r["id_sede"]:
+            st.caption(":orange[↺ Ferretería de la última cotización]")
 
         detalles = []
         if r["distancia_km"] is not None:
@@ -701,66 +1050,202 @@ def _resumen_y_pdf(usuario):
     cliente = st.session_state.cliente or {}
     id_cliente = cliente.get("id_cliente")
 
-    promos = db.promociones_de_sede(elegida["id_sede"], elegida["monto"], id_cliente)
-    bonos = db.bonos_post_venta(elegida["id_sede"], elegida["monto"], id_cliente)
+    # Las dos listas se juntan: el asesor elige entre todas, sean descuento
+    # inmediato o bono posterior.
+    en_cotizacion = db.promociones_de_sede(elegida["id_sede"], elegida["monto"], id_cliente)
+    post_venta = db.bonos_post_venta(elegida["id_sede"], elegida["monto"], id_cliente)
+    promos = [{**p, "momento": "cotizacion"} for p in en_cotizacion] + \
+             [{**p, "momento": "venta"} for p in post_venta]
 
     with st.container(border=True):
         st.markdown(f"**{elegida['ferreteria']}**")
 
-        descuento = 0.0
-        promos_elegidas = []
-        if promos:
-            st.caption("Promociones")
-            for p in promos:
-                automatica = p.get("aplicacion") == "automatica"
-                aplicar = st.checkbox(
-                    f"{p['nombre']} · {config.soles(p['beneficio'])}",
-                    value=True, disabled=automatica,
-                    key=f"promo_{p['id_promocion']}",
-                    help="Automática: no se puede quitar." if automatica else None,
-                )
-                promos_elegidas.append({**p, "aplicada": aplicar})
-                if aplicar and p["modalidad"] == "descuento":
-                    descuento += float(p["beneficio"])
+        decididas = _bloque_promociones(promos)
+        descuento = sum(float(p["beneficio"]) for p in decididas
+                        if p["aplicada"] and p["modalidad"] == "descuento"
+                        and p["momento"] == "cotizacion")
+        devolucion = sum(float(p["beneficio"]) for p in decididas
+                         if p["aplicada"] and p["modalidad"] == "devolucion")
 
-        total = elegida["monto"] - descuento
-        devolucion = sum(float(b["beneficio"]) for b in bonos) if bonos else 0.0
+        flete = _bloque_flete()
+        total = elegida["monto"] - descuento + flete
 
         st.divider()
-        st.markdown(f"Subtotal · {config.soles(elegida['monto'])}")
+        st.markdown(f"Productos · {config.soles(elegida['monto'])}")
         if descuento:
-            st.markdown(f"Descuento SIDEREXPRESS · :green[−{config.soles(descuento)}]")
-        st.markdown(f"### {config.soles(total)}")
+            aplicados = sum(1 for p in decididas
+                            if p["aplicada"] and p["modalidad"] == "descuento")
+            st.markdown(f"Descuentos aplicados ({aplicados}) · "
+                        f":green[−{config.soles(descuento)}]")
+        if flete:
+            st.markdown(f"Flete · {config.soles(flete)}")
+
+        st.markdown(f"### Paga hoy: {config.soles(total)}")
+        if descuento:
+            st.caption(f"Sin promociones pagaría {config.soles(elegida['monto'] + flete)}")
         if devolucion:
-            st.info(f"Además recibirá {config.soles(devolucion)} de bono después de comprar.")
+            st.info(f"Además recibirá {config.soles(devolucion)} después de comprar. "
+                    "El monto exacto se calcula sobre lo que pague.")
 
-        if st.button("Generar cotización PDF", type="primary", width="stretch",
-                     key="btn_generar"):
-            _guardar_y_generar_pdf(usuario, elegida, promos_elegidas,
-                                   descuento, total, devolucion)
+        pdf = _pdf_de_esta_negociacion()
 
-    # El botón de descarga aparece después de generar
-    if st.session_state.get("pdf_generado"):
-        st.download_button(
-            "⬇ Descargar PDF",
-            data=st.session_state.pdf_generado["bytes"],
-            file_name=st.session_state.pdf_generado["nombre"],
-            mime="application/pdf",
-            width="stretch",
-        )
+        if pdf is None:
+            if st.button("Generar cotización PDF", type="primary", width="stretch",
+                         key="btn_generar"):
+                _guardar_y_generar_pdf(usuario, elegida, decididas,
+                                       descuento, total, devolucion)
+        else:
+            st.success(f"{pdf['codigo']} generada.")
+            st.download_button(
+                f"⬇ Descargar {pdf['codigo']}",
+                data=pdf["bytes"], file_name=pdf["nombre"],
+                mime="application/pdf", width="stretch", key="btn_descargar_pdf",
+            )
+            st.caption("Para emitir otra versión, cambia la lista y recotiza.")
+
+
+def _descripcion_bono(promo) -> str:
+    """Qué recibe el cliente, dicho como se lo explicaría el asesor."""
+    monto = config.soles(promo["beneficio"])
+    if promo["modalidad"] == "descuento":
+        return f"Se le descuentan {monto} si compra esta cotización"
+    return f"Recibirá {monto} después de realizar la compra"
+
+
+def _bloque_promociones(promos: list[dict]) -> list[dict]:
+    """Deja que el asesor elija qué bonos darle al cliente.
+
+    Hay dos grupos con reglas distintas:
+      acumulables  se pueden dar todos, se suman
+      excluyentes  solo uno, porque compiten entre sí
+
+    Cualquiera se puede dejar sin aplicar, incluidos los automáticos.
+    Se devuelven TODOS con su decisión: los descartados también se guardan,
+    para saber después qué se ofreció y qué se aceptó.
+    """
+    if not promos:
+        st.caption("Este cliente no tiene bonos activos.")
+        return []
+
+    cantidad = len(promos)
+    st.markdown(f"**Tienes {cantidad} bono{'s' if cantidad != 1 else ''} "
+                f"activo{'s' if cantidad != 1 else ''} para este cliente**")
+
+    # Apaga todo de golpe. Se escriben los valores de cada campo en vez de
+    # usar una bandera: así el estado de la pantalla es siempre el real.
+    if st.button("No dar ninguno", width="stretch", key="btn_sin_promos"):
+        for promo in promos:
+            st.session_state[f"promo_{promo['id_promocion']}"] = False
+        st.session_state["radio_promos"] = "Ninguno de estos"
+        st.rerun()
+
+    acumulables = [p for p in promos if p.get("acumulable")]
+    excluyentes = [p for p in promos if not p.get("acumulable")]
+    decididas = []
+
+    # --- Los que compiten entre sí: solo uno
+    if excluyentes:
+        etiquetas = {}
+        for promo in sorted(excluyentes, key=lambda x: -float(x["beneficio"])):
+            etiquetas[f"{promo['nombre']} · {_descripcion_bono(promo)}"] = promo
+        opciones = list(etiquetas) + ["Ninguno de estos"]
+
+        if len(excluyentes) > 1:
+            st.caption("Solo uno de estos")
+        # Sin "index": con una key, el valor guardado es el que manda. Pasar
+        # index además haría que la elección del asesor se pise en cada clic.
+        elegida = st.radio("Bonos excluyentes", opciones,
+                           label_visibility="collapsed", key="radio_promos")
+
+        for etiqueta, promo in etiquetas.items():
+            decididas.append({**promo, "aplicada": etiqueta == elegida})
+
+    # --- Los que se pueden dar juntos
+    if acumulables:
+        if excluyentes:
+            st.caption("Estos se pueden dar además")
+        for promo in acumulables:
+            marcada = st.checkbox(
+                f"{promo['nombre']} · {_descripcion_bono(promo)}",
+                value=promo.get("aplicacion") != "manual",
+                key=f"promo_{promo['id_promocion']}",
+            )
+            decididas.append({**promo, "aplicada": marcada})
+
+    return decididas
+
+
+def _pdf_de_esta_negociacion():
+    """El PDF en memoria, solo si pertenece a la negociación abierta.
+
+    Sin esta comprobación, al cambiar de negociación seguiría apareciendo el
+    botón de descarga del documento anterior.
+    """
+    pdf = st.session_state.get("pdf_generado")
+    if not pdf:
+        return None
+
+    actual = (st.session_state.negociacion or {}).get("id_negociacion")
+    if pdf.get("id_negociacion") != actual:
+        st.session_state.pdf_generado = None
+        return None
+    return pdf
+
+
+def _bloque_flete() -> float:
+    """Costo de entrega. Solo se cobra cuando la entrega lo exige.
+
+    Está apagado por defecto: la mayoría de las entregas no lo llevan, y un
+    campo siempre visible invita a llenarlo sin necesidad.
+    """
+    cobrar = st.checkbox("Cobrar flete", value=bool(st.session_state.flete_monto),
+                         help="Actívalo solo si esta entrega tiene costo de envío.")
+
+    if not cobrar:
+        if st.session_state.flete_monto:
+            st.session_state.flete_monto = 0.0
+            st.session_state.flete_motivo = ""
+        return 0.0
+
+    col_monto, col_motivo = st.columns([1, 1.6])
+    monto = col_monto.number_input(
+        "Monto", min_value=0.0, step=10.0, format="%.2f",
+        value=float(st.session_state.flete_monto or 0.0),
+        label_visibility="collapsed", key="input_flete_monto",
+    )
+    motivo = col_motivo.text_input(
+        "Motivo", value=st.session_state.flete_motivo or "",
+        placeholder="Motivo del flete", label_visibility="collapsed",
+        key="input_flete_motivo",
+    )
+    st.session_state.flete_monto = float(monto or 0)
+    st.session_state.flete_motivo = motivo.strip()
+
+    if monto and not motivo.strip():
+        st.caption(":orange[Escribe el motivo: sale en el PDF y sirve para "
+                   "analizar los fletes después.]")
+
+    return float(monto or 0)
 
 
 def _guardar_y_generar_pdf(usuario, elegida, promociones, descuento, total, devolucion):
     """Guarda la cotización en la base y arma el PDF."""
-    from datetime import datetime, timedelta
-
     cliente = st.session_state.cliente
     negociacion = st.session_state.negociacion
     coords = extraer_coordenadas(st.session_state.ubicacion_texto)
+    ticket = st.session_state.ticket_actual
+
+    # Sin ticket no se puede saber de qué conversación salió la cotización
+    if not ticket:
+        st.error("Ingresa el ID CRM (arriba del cliente) antes de generar la cotización.")
+        return
 
     # Si es una negociación nueva, primero se crea
     if negociacion is None:
         try:
+            # La zona la deduce la base a partir del distrito de la obra.
+            # Se manda la del asesor solo como respaldo, para cuando no hay
+            # distrito conocido.
             negociacion = db.crear_negociacion({
                 "id_cliente": cliente["id_cliente"],
                 "id_usuario": usuario["id_usuario"],
@@ -770,7 +1255,22 @@ def _guardar_y_generar_pdf(usuario, elegida, promociones, descuento, total, devo
             })
             st.session_state.negociacion = negociacion
         except Exception as e:
-            st.error(f"No se pudo crear la negociación: {e}")
+            detalle = str(e)
+            if "ya tiene una negociación activa" in detalle:
+                st.error(detalle.split("CONTEXT")[0].strip())
+            else:
+                st.error(f"No se pudo crear la negociación: {e}")
+            return
+
+    # El primer ticket de la negociación es el de origen; los siguientes,
+    # de seguimiento (el cliente volvió por otra conversación).
+    ya_registrados = [t["ticket"] for t in _tickets_de(negociacion)]
+    if ticket not in ya_registrados:
+        try:
+            db.agregar_ticket(negociacion["id_negociacion"], ticket,
+                              "origen" if not ya_registrados else "seguimiento")
+        except Exception as e:
+            st.error(f"No se pudo registrar el ID CRM: {e}")
             return
 
     # Detalle: lo que se cotizó en la ferretería elegida
@@ -794,14 +1294,15 @@ def _guardar_y_generar_pdf(usuario, elegida, promociones, descuento, total, devo
         "elegida": r["id_sede"] == elegida["id_sede"],
     } for i, r in enumerate(st.session_state.resultados)]
 
+    # Se guardan las aplicadas y las omitidas: la comparación entre lo que se
+    # ofreció y lo que se aceptó es lo que alimenta v_promociones_omitidas.
     promos_json = [{
         "id_promocion": p["id_promocion"],
         "modalidad": p["modalidad"],
-        "tipo": "porcentaje",
+        "tipo": p.get("tipo") or "porcentaje",
         "monto_beneficio": float(p["beneficio"]),
-        "financiado_por": "siderexpress",
+        "financiado_por": p.get("financiado_por") or "siderexpress",
         "aplicada": p["aplicada"],
-        "motivo_no_aplicada": None if p["aplicada"] else "El asesor la desactivó",
     } for p in promociones]
 
     cabecera = {
@@ -813,6 +1314,9 @@ def _guardar_y_generar_pdf(usuario, elegida, promociones, descuento, total, devo
         "latitud": coords[0] if coords else None,
         "longitud": coords[1] if coords else None,
         "id_distrito": st.session_state.id_distrito or negociacion.get("id_distrito"),
+        "ticket": ticket,
+        "monto_flete": st.session_state.flete_monto or 0,
+        "motivo_flete": st.session_state.flete_motivo or None,
     }
 
     try:
@@ -822,17 +1326,22 @@ def _guardar_y_generar_pdf(usuario, elegida, promociones, descuento, total, devo
         return
 
     # ------------------------------------------------------------- el PDF ---
-    ahora = datetime.now()
     por_sku = {c["id_sku"]: c for c in db.catalogo_skus()}
+
+    # Las fechas se leen de la base, que ya calculó el vencimiento en hora de
+    # Lima. Calcularlas aquí daría la hora del servidor, que está en UTC.
+    guardada = next((c for c in db.cotizaciones_de(negociacion["id_negociacion"])
+                     if c["id_cotizacion"] == id_cotizacion), None)
     tipo = (cliente.get("m_tipos_cliente") or {})
     documento = " ".join(x for x in [cliente.get("tipo_documento"),
                                      cliente.get("numero_documento")] if x)
 
     datos = {
+        "logo": config.LOGO,
         "cotizacion": {
             "codigo": config.codigo_cotizacion(id_cotizacion),
-            "fecha": ahora.strftime("%d/%m/%Y %H:%M"),
-            "vence": (ahora + timedelta(days=1)).strftime("%d/%m/%Y %H:%M"),
+            "fecha": config.fecha_hora((guardada or {}).get("fecha")),
+            "vence": config.vence_texto((guardada or {}).get("fecha_vencimiento")),
         },
         "cliente": {
             "nombre": cliente.get("nombre"),
@@ -849,6 +1358,7 @@ def _guardar_y_generar_pdf(usuario, elegida, promociones, descuento, total, devo
         "productos": [{
             "descripcion": por_sku.get(d["id_sku"], {}).get("producto", d["descripcion"]),
             "marca": por_sku.get(d["id_sku"], {}).get("marca", ""),
+            "unidad": por_sku.get(d["id_sku"], {}).get("unidad_nombre", ""),
             "cantidad": d["cantidad"],
             "precio": d["precio_manual"] or d["precio_lista"],
             "subtotal": d["subtotal"],
@@ -856,6 +1366,8 @@ def _guardar_y_generar_pdf(usuario, elegida, promociones, descuento, total, devo
         "totales": {
             "subtotal": elegida["monto"],
             "descuento": descuento,
+            "flete": st.session_state.flete_monto or 0,
+            "motivo_flete": st.session_state.flete_motivo or "",
             "total": total,
             "devolucion": devolucion,
         },
@@ -865,7 +1377,14 @@ def _guardar_y_generar_pdf(usuario, elegida, promociones, descuento, total, devo
     st.session_state.pdf_generado = {
         "bytes": generar_pdf(datos),
         "nombre": f"{config.codigo_cotizacion(id_cotizacion)}.pdf",
+        "codigo": config.codigo_cotizacion(id_cotizacion),
+        "id_negociacion": negociacion["id_negociacion"],
     }
+    if guardada:
+        st.session_state.cotizacion_actual = guardada
+    actualizada = db.negociacion_por_id(negociacion["id_negociacion"])
+    if actualizada:
+        st.session_state.negociacion = actualizada
     st.success(f"Cotización {config.codigo_cotizacion(id_cotizacion)} guardada.")
     st.rerun()
 
@@ -920,6 +1439,12 @@ def _bloque_venta(usuario):
                                               index=None, placeholder="Opcional")
         numero = col_num.text_input("N° de comprobante", placeholder="B001-00123")
         url = st.text_input("Enlace del voucher", placeholder="Opcional por ahora")
+        ticket_venta = st.text_input(
+            "ID CRM donde llegó el comprobante",
+            value=st.session_state.ticket_actual or "",
+            help="Normalmente es el mismo de la cotización. Cámbialo si el "
+                 "cliente pagó en otra conversación.",
+        )
 
         st.caption("Se copian los productos de la cotización. "
                    "Si compró menos, se ajusta después de registrarla.")
@@ -934,9 +1459,16 @@ def _bloque_venta(usuario):
                 "tipo_comprobante": tipo_comprobante,
                 "numero_comprobante": numero.strip() or None,
                 "url_comprobante_pago": url.strip() or None,
+                "ticket": ticket_venta.strip() or None,
             }
             try:
                 id_venta = db.registrar_venta(datos)
+                # El ticket del pago queda asociado como cierre de la negociación
+                if ticket_venta.strip():
+                    registrados = [t["ticket"] for t in _tickets_de(negociacion)]
+                    if ticket_venta.strip() not in registrados:
+                        db.agregar_ticket(negociacion["id_negociacion"],
+                                          ticket_venta.strip(), "cierre")
             except Exception as e:
                 st.error(f"No se pudo registrar la venta: {e}")
                 return
