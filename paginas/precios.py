@@ -292,7 +292,7 @@ def _tabla_precios(nombre, sedes, catalogo, precios):
 
     if unico:
         configuracion[COLUMNA_UNICA] = st.column_config.NumberColumn(
-            "Precio", min_value=0.01, step=0.10, format="%.2f",
+            "Precio", min_value=0.0001, step=0.0001, format="%.4f",
             help=f"Se guarda en las {len(sedes)} sedes · vacío = no lo vende",
         )
         # Aviso: al guardar se pisan los precios distintos que hubiera
@@ -313,7 +313,7 @@ def _tabla_precios(nombre, sedes, catalogo, precios):
 
         for sede in sedes:
             configuracion[sede["codigo"]] = st.column_config.NumberColumn(
-                sede["codigo"], min_value=0.01, step=0.10, format="%.2f",
+                sede["codigo"], min_value=0.0001, step=0.0001, format="%.4f",
                 help=f"{sede['nombre']} · vacío = no lo vende",
             )
 
