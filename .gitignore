@@ -1,5 +1,5 @@
 # Llaves y contraseñas — NUNCA subir
-secrets.toml
+.streamlit/secrets.toml
 .env
 
 # Python
@@ -12,5 +12,5 @@ venv/
 Thumbs.db
 desktop.ini
 
-*.zip
 *.sql
+*.zip
