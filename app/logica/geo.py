@@ -50,12 +50,16 @@ def extraer_coordenadas(texto: str):
     return lat, lon
 
 
-def sedes_cercanas(lat, lon, sedes: list[dict], top_n: int = 5) -> list[dict]:
-    """Las sedes más cercanas a un punto, una por ferretería.
+def sedes_cercanas(lat, lon, sedes: list[dict], top_n: int = 60) -> list[dict]:
+    """Las sedes más cercanas a un punto, ordenadas por distancia.
 
-    Se toma solo la sede más cercana de cada ferretería: si no, una cadena
-    con tres locales cerca ocuparía todos los puestos y quedaría sin
-    competencia.
+    Devuelve TODAS las sedes, incluidas varias de la misma ferretería: cuál
+    de ellas compite se decide después de cotizar, quedándose con la del
+    mejor precio. Antes se descartaba aquí la más lejana de cada ferretería,
+    y eso hacía que una sede cara pero cercana le ganara a una barata.
+
+    top_n es solo un tope de rendimiento: con muchas sedes, cotizarlas todas
+    sería lento y las más lejanas casi nunca ganan.
     """
     con_distancia = []
     for s in sedes:
@@ -65,10 +69,4 @@ def sedes_cercanas(lat, lon, sedes: list[dict], top_n: int = 5) -> list[dict]:
             distancia_km(lat, lon, s["latitud"], s["longitud"]), 2)})
 
     con_distancia.sort(key=lambda s: s["distancia_km"])
-
-    mejor_por_ferreteria = {}
-    for s in con_distancia:
-        if s["ferreteria"] not in mejor_por_ferreteria:
-            mejor_por_ferreteria[s["ferreteria"]] = s
-
-    return list(mejor_por_ferreteria.values())[:top_n]
+    return con_distancia[:top_n]

@@ -17,7 +17,7 @@ import config
 import db
 from logica.cotizacion import (cotizar_en_sedes, elegir_regla, monto_referencial,
                                sedes_candidatas)
-from logica.geo import extraer_coordenadas
+from logica.geo import extraer_coordenadas, sedes_cercanas
 from logica.pdf import generar_pdf
 
 
@@ -51,7 +51,6 @@ VALORES_INICIALES = {
     "negociacion_bloqueante": None,
     # Flete: solo se cobra cuando la entrega lo exige
     "flete_monto": 0.0,
-    "flete_motivo": "",
 }
 
 
@@ -71,7 +70,6 @@ def _limpiar_resultados():
     st.session_state.sede_elegida = None
     st.session_state.pdf_generado = None
     st.session_state.flete_monto = 0.0
-    st.session_state.flete_motivo = ""
 
 
 # ===========================================================================
@@ -529,9 +527,30 @@ def _ubicacion():
 
     if texto and coords is None:
         st.warning("No se reconocen las coordenadas. Pega el link completo de Google Maps.")
+
     elif coords:
-        st.caption(f"📍 {coords[0]:.6f}, {coords[1]:.6f} · se buscará por distancia")
-        return          # con coordenadas no hace falta elegir distrito
+        # Con coordenadas, el distrito lo deduce la base a partir de los
+        # límites distritales. Así la negociación queda con su zona correcta.
+        geo = db.distrito_de_coordenadas(coords[0], coords[1])
+
+        if geo:
+            st.session_state.id_distrito = geo["id_distrito"]
+            st.session_state.id_provincia = geo["id_provincia"]
+            distrito = (geo["distrito"] or "").replace("_", " ").title()
+            provincia = (geo["provincia"] or "").title()
+            departamento = (geo["departamento"] or "").title()
+            st.caption(f"📍 {distrito} · {provincia} · {departamento} "
+                       "· se buscará por distancia")
+            if not geo.get("con_cobertura"):
+                st.warning(f"{distrito} está fuera de las zonas que atendemos. "
+                           "Igual se puede cotizar, pero quizá no haya ferreterías cerca.")
+            return
+
+        # El punto no cae en ningún distrito cargado: se pide a mano
+        st.caption(f"📍 {coords[0]:.6f}, {coords[1]:.6f} · no se identificó "
+                   "el distrito. Elígelo para que la negociación quede en su zona:")
+        _selectores_geografia()
+        return
 
     # --- Sin coordenadas: se elige la zona a mano
     st.caption("Sin ubicación exacta. Elige la zona del cliente:")
@@ -539,9 +558,11 @@ def _ubicacion():
 
 
 def _selectores_geografia():
+    # Solo se ofrecen los distritos con cobertura: son donde hay ferreterías
     distritos = db.catalogo_distritos()
     if not distritos:
-        st.warning("No hay distritos cargados en la base.")
+        st.warning("No hay distritos con cobertura configurados. "
+                   "Márcalos con con_cobertura = true en m_distritos.")
         return
 
     guardado = next((d for d in distritos
@@ -582,9 +603,9 @@ def _selectores_geografia():
         st.session_state.id_provincia = nueva_provincia
         _limpiar_resultados()
 
-    if distrito and not opciones[nombres.index(distrito)]["con_cobertura"]:
-        st.warning("Ese distrito no está marcado con cobertura. "
-                   "Igual se puede cotizar, pero quizá no haya ferreterías cerca.")
+    if not distritos:
+        st.warning("No hay distritos con cobertura configurados. "
+                   "Márcalos con con_cobertura = true en m_distritos.")
 
 
 def _lista_materiales():
@@ -746,29 +767,6 @@ def _fila_material(indice, item):
         _limpiar_resultados()
         st.rerun()
 
-    # El motivo solo aparece si hay precio negociado: así no ocupa espacio
-    # en las líneas normales, que son la mayoría.
-    if precio:
-        _motivo_precio(indice, item)
-
-
-def _motivo_precio(indice, item):
-    with st.container(border=True):
-        st.caption("¿Por qué el precio distinto? · obligatorio")
-        col_motivo, col_quien = st.columns([1.7, 1.2])
-
-        motivo = col_motivo.text_input(
-            "Motivo", value=item.get("motivo") or "", label_visibility="collapsed",
-            placeholder="Ej. rebaja por volumen", key=f"motivo_{indice}",
-        )
-        quien = col_quien.text_input(
-            "Autorizó", value=item.get("autorizado_por") or "",
-            label_visibility="collapsed", placeholder="¿Quién autorizó?",
-            key=f"autorizo_{indice}",
-        )
-        st.session_state.materiales[indice]["motivo"] = motivo.strip() or None
-        st.session_state.materiales[indice]["autorizado_por"] = quien.strip() or None
-
 
 def _pie_lista():
     """Total referencial y el botón de cotizar."""
@@ -808,10 +806,6 @@ def _armar_lineas(catalogo) -> tuple[list[dict], list[str]]:
             continue
 
         precio_negociado = item.get("precio_negociado")
-        if precio_negociado and not (item.get("motivo") or "").strip():
-            errores.append(
-                f"Fila {i} ({producto}): el precio negociado necesita un motivo.")
-            continue
 
         opciones = [c for c in catalogo if c["producto"] == producto]
         if not opciones:
@@ -877,6 +871,19 @@ def _validar_cliente() -> list[str]:
     return ["Antes de cotizar: " + ", ".join(faltan) + "."]
 
 
+def _zona_de_la_obra(coords, id_distrito, sedes) -> int | None:
+    """Zona donde está la obra, para saber qué reglas aplicar."""
+    if id_distrito:
+        return db.zona_de_distrito(id_distrito)
+
+    if coords:
+        cercanas = sedes_cercanas(coords[0], coords[1], sedes, top_n=1)
+        if cercanas:
+            return db.zona_de_distrito(cercanas[0].get("id_distrito"))
+
+    return None
+
+
 def _recotizar():
     catalogo = db.catalogo_skus()
     # Primero el cliente, después los materiales
@@ -911,13 +918,18 @@ def _recotizar():
         id_provincia = distrito["id_provincia"] if distrito else None
 
     monto = monto_referencial(lineas, db.precios_referenciales())
-    regla = elegir_regla(monto, coords is not None, db.reglas_cotizacion())
+
+    # Las reglas pueden variar por zona: se piden las de la zona de la obra.
+    # Con coordenadas, mientras no tengamos los límites distritales, se usa
+    # la zona de la sede más cercana como aproximación.
+    sedes = db.catalogo_sedes()
+    id_zona = _zona_de_la_obra(coords, id_distrito, sedes)
+    regla = elegir_regla(monto, coords is not None, db.reglas_cotizacion(id_zona))
 
     if regla is None:
         st.error("No hay una regla configurada para este monto. Revisa m_reglas_cotizacion.")
         return
 
-    sedes = db.catalogo_sedes()
     candidatas = sedes_candidatas(
         regla, sedes,
         coordenadas=coords,
@@ -1204,27 +1216,14 @@ def _bloque_flete() -> float:
     if not cobrar:
         if st.session_state.flete_monto:
             st.session_state.flete_monto = 0.0
-            st.session_state.flete_motivo = ""
         return 0.0
 
-    col_monto, col_motivo = st.columns([1, 1.6])
-    monto = col_monto.number_input(
-        "Monto", min_value=0.0, step=10.0, format="%.2f",
+    monto = st.number_input(
+        "Monto del flete", min_value=0.0, step=10.0, format="%.2f",
         value=float(st.session_state.flete_monto or 0.0),
-        label_visibility="collapsed", key="input_flete_monto",
-    )
-    motivo = col_motivo.text_input(
-        "Motivo", value=st.session_state.flete_motivo or "",
-        placeholder="Motivo del flete", label_visibility="collapsed",
-        key="input_flete_motivo",
+        key="input_flete_monto",
     )
     st.session_state.flete_monto = float(monto or 0)
-    st.session_state.flete_motivo = motivo.strip()
-
-    if monto and not motivo.strip():
-        st.caption(":orange[Escribe el motivo: sale en el PDF y sirve para "
-                   "analizar los fletes después.]")
-
     return float(monto or 0)
 
 
@@ -1316,7 +1315,6 @@ def _guardar_y_generar_pdf(usuario, elegida, promociones, descuento, total, devo
         "id_distrito": st.session_state.id_distrito or negociacion.get("id_distrito"),
         "ticket": ticket,
         "monto_flete": st.session_state.flete_monto or 0,
-        "motivo_flete": st.session_state.flete_motivo or None,
     }
 
     try:
@@ -1367,7 +1365,6 @@ def _guardar_y_generar_pdf(usuario, elegida, promociones, descuento, total, devo
             "subtotal": elegida["monto"],
             "descuento": descuento,
             "flete": st.session_state.flete_monto or 0,
-            "motivo_flete": st.session_state.flete_motivo or "",
             "total": total,
             "devolucion": devolucion,
         },

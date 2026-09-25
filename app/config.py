@@ -20,11 +20,13 @@ LOGO = str(Path(__file__).parent / "assets" / "logo.png")
 # VALORES QUE PUEDES CAMBIAR
 # ---------------------------------------------------------------------------
 
-# Cuántas sedes cercanas se evalúan al cotizar.
-# Ojo: los montos y radios de las reglas 1.1, 1.2 y 1.3 NO están aquí.
-# Viven en la tabla m_reglas_cotizacion de Supabase, para poder cambiarlos
-# sin tocar código.
-TOP_N_SEDES = 5
+# Tope de sedes que se cotizan, de la más cercana a la más lejana.
+# No limita cuántas ferreterías se muestran: es solo un freno de rendimiento
+# para no consultar precios de cientos de sedes.
+#
+# Ojo: los montos y radios de las reglas NO están aquí. Viven en la tabla
+# m_reglas_cotizacion de Supabase, y ahora pueden variar por zona.
+TOP_N_SEDES = 60
 
 # Hasta cuántos productos faltantes se muestran por defecto en el panel
 # de ferreterías. 0 = solo las que tienen la canasta completa.

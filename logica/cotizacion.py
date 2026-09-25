@@ -125,11 +125,14 @@ def cotizar_en_sedes(lineas: list[dict], sedes: list[dict],
             "detalle": detalle,
         })
 
-    # Primero las más completas; dentro de cada grupo, la más barata
-    resultados.sort(key=lambda r: (r["n_faltantes"], r["monto"]))
+    # Primero las más completas; dentro de cada grupo, la más barata; y si
+    # dos empatan en monto, la más cercana.
+    resultados.sort(key=lambda r: (r["n_faltantes"], r["monto"],
+                                   r["distancia_km"] if r["distancia_km"] is not None else 0))
 
-    # Una sola sede por ferretería: la que le conviene más al cliente.
-    # Si no, una cadena con varios locales llenaría la lista.
+    # Una sola sede por ferretería, elegida DESPUÉS de cotizar: la que le
+    # conviene más al cliente. Si no, una cadena con varios locales llenaría
+    # la lista con la misma ferretería.
     if una_por_ferreteria:
         vistas, unicos = set(), []
         for r in resultados:

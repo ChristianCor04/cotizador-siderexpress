@@ -158,15 +158,21 @@ def catalogo_sedes() -> list[dict]:
 
 @st.cache_data(ttl=600)
 def catalogo_distritos() -> list[dict]:
-    """Distritos con cobertura, con su provincia y departamento.
+    """Distritos CON COBERTURA, con su provincia y departamento.
 
-    Se usa cuando el cliente no pasa ubicación exacta: el asesor elige
-    departamento, provincia y distrito, y con eso se aplican las reglas 2.x.
+    Se filtran a propósito por dos motivos: la API devuelve como máximo 1,000
+    filas por consulta y en Perú hay 1,891 distritos, así que sin filtro se
+    perdían los departamentos del final (La Libertad es el 13, Lambayeque el
+    14). Y además, ofrecer 1,891 opciones donde se atiende en 111 no ayuda.
+
+    Para habilitar un distrito nuevo:
+        update m_distritos set con_cobertura = true, id_zona = ...
+         where ubigeo = '...';
     """
     filas = conectar().table("m_distritos").select(
         "id_distrito, nombre, con_cobertura, "
         "m_provincias(id_provincia, nombre, m_departamentos(id_departamento, nombre))"
-    ).execute().data
+    ).eq("con_cobertura", True).execute().data
 
     distritos = []
     for f in filas:
@@ -186,10 +192,39 @@ def catalogo_distritos() -> list[dict]:
 
 
 @st.cache_data(ttl=600)
-def reglas_cotizacion() -> list[dict]:
-    """Los umbrales de monto y radio. Se editan en Supabase, no aquí."""
-    return conectar().table("m_reglas_cotizacion").select("*") \
-        .eq("activo", True).order("monto_desde").execute().data
+def reglas_cotizacion(id_zona: int | None = None) -> list[dict]:
+    """Umbrales de monto y radio que aplican a una zona.
+
+    Si la zona tiene reglas propias se usan esas; si no, las generales.
+    Se editan en Supabase, no aquí.
+    """
+    return conectar().rpc("reglas_de_zona", {"p_id_zona": id_zona}).execute().data or []
+
+
+@st.cache_data(ttl=3600)
+def distrito_de_coordenadas(latitud: float, longitud: float) -> dict | None:
+    """Distrito, provincia, departamento y zona donde cae un punto.
+
+    Lo resuelve la base con los límites distritales (PostGIS). Devuelve None
+    si el punto no cae en ningún polígono cargado, o si todavía no se
+    cargaron: en ese caso la pantalla pide elegir el distrito a mano.
+    """
+    try:
+        filas = conectar().rpc("distrito_de_coordenadas", {
+            "p_latitud": latitud, "p_longitud": longitud,
+        }).execute().data
+    except Exception:
+        return None
+    return filas[0] if filas else None
+
+
+@st.cache_data(ttl=600)
+def zona_de_distrito(id_distrito: int | None) -> int | None:
+    if id_distrito is None:
+        return None
+    filas = conectar().table("m_distritos").select("id_zona") \
+        .eq("id_distrito", id_distrito).execute().data
+    return filas[0]["id_zona"] if filas else None
 
 
 @st.cache_data(ttl=600)
@@ -222,13 +257,24 @@ def limpiar_cache():
 def precios_de(ids_sku: list[int], ids_sede: list[int]) -> list[dict]:
     """Precios vigentes de ciertos productos en ciertas sedes.
 
-    Se pide solo lo necesario, no toda la tabla: con miles de precios,
-    traerlos todos haría la app lenta.
+    Se trae por páginas porque la API devuelve como máximo 1,000 filas: al
+    cotizar hasta 60 sedes con 20 productos serían 1,200 y se perderían
+    precios en silencio, que es el peor tipo de error.
     """
     if not ids_sku or not ids_sede:
         return []
-    filas = conectar().table("m_precios").select("id_precio, id_sede, id_sku, precio") \
-        .in_("id_sku", ids_sku).in_("id_sede", ids_sede).eq("activo", True).execute().data
+
+    filas, desde, tamano = [], 0, 1000
+    while True:
+        pagina = conectar().table("m_precios") \
+            .select("id_precio, id_sede, id_sku, precio") \
+            .in_("id_sku", ids_sku).in_("id_sede", ids_sede) \
+            .eq("activo", True).range(desde, desde + tamano - 1).execute().data
+        filas.extend(pagina)
+        if len(pagina) < tamano:
+            break
+        desde += tamano
+
     return [{**f, "precio": float(f["precio"])} for f in filas]
 
 

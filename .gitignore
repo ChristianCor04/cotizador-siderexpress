@@ -8,9 +8,9 @@ __pycache__/
 venv/
 .venv/
 
-#descargas
-*.zip
-
 # Windows
 Thumbs.db
 desktop.ini
+
+*.zip
+*.sql
