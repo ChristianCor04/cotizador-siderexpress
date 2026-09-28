@@ -619,6 +619,11 @@ def _lista_materiales():
     st.markdown("**Lista de materiales**")
 
     catalogo = db.catalogo_skus()
+
+    aviso = st.session_state.pop("aviso_materiales", None)
+    if aviso:
+        st.info(aviso)
+
     _barra_agregar(catalogo)
 
     if not st.session_state.materiales:
@@ -711,15 +716,27 @@ def _barra_agregar(catalogo):
         falta_unidad = bool(unidades) and unidad is None
         if col_boton.button("＋ Agregar", width="stretch",
                             disabled=not producto or falta_unidad):
-            st.session_state.materiales.append({
-                "producto": producto,
-                "marca": marca,
-                "unidad": unidad,
-                "cantidad": float(cantidad),
-                "precio_negociado": None,
-                "motivo": None,
-                "autorizado_por": None,
-            })
+            # Si ya está en la lista (mismo producto, marca y unidad), se suma
+            # a esa fila: dos filas iguales impiden guardar la cotización.
+            existente = next((m for m in st.session_state.materiales
+                              if m["producto"] == producto
+                              and m.get("marca") == marca
+                              and m.get("unidad") == unidad), None)
+            if existente:
+                existente["cantidad"] = float(existente["cantidad"]) + float(cantidad)
+                st.session_state.aviso_materiales = (
+                    f"{producto} ya estaba en la lista: se sumaron las cantidades "
+                    f"({existente['cantidad']:,.2f} en total).")
+            else:
+                st.session_state.materiales.append({
+                    "producto": producto,
+                    "marca": marca,
+                    "unidad": unidad,
+                    "cantidad": float(cantidad),
+                    "precio_negociado": None,
+                    "motivo": None,
+                    "autorizado_por": None,
+                })
             # Subir la versión limpia la barra para el siguiente producto
             st.session_state.version_tabla += 1
             _limpiar_resultados()
@@ -734,7 +751,14 @@ def _encabezado_lista():
 
 
 def _fila_material(indice, item):
-    """Una línea de la canasta. Solo cantidad y precio son editables."""
+    """Una línea de la canasta. Solo cantidad y precio son editables.
+
+    Las keys de los campos llevan version_tabla, además de la posición. Sin
+    eso, Streamlit asocia cada campo a su posición: al borrar una fila, la
+    siguiente heredaba la cantidad de la borrada, y al sumar un producto
+    repetido el campo volvía a escribir la cantidad vieja.
+    """
+    v = st.session_state.version_tabla
     col_prod, col_marca, col_cant, col_precio, col_borrar = \
         st.columns([2.4, 1.4, 0.8, 1.1, 0.4], vertical_alignment="center")
 
@@ -746,7 +770,7 @@ def _fila_material(indice, item):
 
     cantidad = col_cant.number_input(
         "Cantidad", min_value=0.01, step=1.0, value=float(item["cantidad"]),
-        format="%.2f", label_visibility="collapsed", key=f"cant_{indice}",
+        format="%.2f", label_visibility="collapsed", key=f"cant_{v}_{indice}",
     )
     if cantidad != item["cantidad"]:
         st.session_state.materiales[indice]["cantidad"] = float(cantidad)
@@ -756,14 +780,15 @@ def _fila_material(indice, item):
         "Precio", min_value=0.0, step=0.10,
         value=float(item["precio_negociado"]) if item["precio_negociado"] else None,
         format="%.2f", label_visibility="collapsed", placeholder="—",
-        key=f"precio_{indice}",
+        key=f"precio_{v}_{indice}",
     )
     if precio != item["precio_negociado"]:
         st.session_state.materiales[indice]["precio_negociado"] = precio
         _limpiar_resultados()
 
-    if col_borrar.button("🗑", key=f"borrar_{indice}", help="Quitar de la lista"):
+    if col_borrar.button("🗑", key=f"borrar_{v}_{indice}", help="Quitar de la lista"):
         st.session_state.materiales.pop(indice)
+        st.session_state.version_tabla += 1     # los campos se redibujan limpios
         _limpiar_resultados()
         st.rerun()
 
@@ -781,6 +806,35 @@ def _pie_lista():
 
     if col_boton.button("🔄 Buscar ferreterías", type="primary", width="stretch"):
         _recotizar()
+
+
+def _unir_filas_repetidas() -> list[str]:
+    """Junta las filas idénticas que ya estuvieran en la lista.
+
+    Cubre las listas armadas antes de que existiera el control al agregar, y
+    las cotizaciones antiguas que se vuelven a abrir. Devuelve qué se unió,
+    para avisarle al asesor.
+    """
+    unidas, avisos = [], []
+    for item in st.session_state.materiales:
+        igual = next((u for u in unidas
+                      if u["producto"] == item["producto"]
+                      and u.get("marca") == item.get("marca")
+                      and u.get("unidad") == item.get("unidad")), None)
+        if igual is None:
+            unidas.append(dict(item))
+            continue
+        igual["cantidad"] = float(igual["cantidad"]) + float(item["cantidad"])
+        # Si solo una de las dos tenía precio negociado, se conserva
+        if not igual.get("precio_negociado") and item.get("precio_negociado"):
+            igual["precio_negociado"] = item["precio_negociado"]
+        avisos.append(f"{item['producto']} estaba repetido: se unió en una sola fila "
+                      f"({igual['cantidad']:,.2f}).")
+
+    if avisos:
+        st.session_state.materiales = unidas
+        st.session_state.version_tabla += 1
+    return avisos
 
 
 def _armar_lineas(catalogo) -> tuple[list[dict], list[str]]:
@@ -886,6 +940,10 @@ def _zona_de_la_obra(coords, id_distrito, sedes) -> int | None:
 
 def _recotizar():
     catalogo = db.catalogo_skus()
+    # Antes de cotizar se juntan las filas repetidas
+    for aviso in _unir_filas_repetidas():
+        st.info(aviso)
+
     # Primero el cliente, después los materiales
     errores = _validar_cliente()
     lineas, errores_lineas = _armar_lineas(catalogo)
@@ -1320,7 +1378,14 @@ def _guardar_y_generar_pdf(usuario, elegida, promociones, descuento, total, devo
     try:
         id_cotizacion = db.guardar_cotizacion(cabecera, lineas, promos_json, ferreterias)
     except Exception as e:
-        st.error(f"No se pudo guardar la cotización: {e}")
+        detalle = str(e)
+        if "uq_cot_detalle_sku" in detalle:
+            st.error("Hay un producto repetido en la lista. Revisa que cada "
+                     "producto aparezca una sola vez y vuelve a cotizar.")
+        elif "chk_cd_modificado" in detalle:
+            st.error("Un precio negociado no es válido. Debe ser mayor a cero.")
+        else:
+            st.error(f"No se pudo guardar la cotización: {e}")
         return
 
     # ------------------------------------------------------------- el PDF ---

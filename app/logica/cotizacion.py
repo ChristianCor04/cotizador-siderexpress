@@ -63,6 +63,39 @@ def sedes_candidatas(regla, sedes, coordenadas=None, id_distrito=None,
     return []
 
 
+def _unir_mismo_sku(detalle: list[dict]) -> list[dict]:
+    """Junta en una sola línea las que terminaron en el mismo SKU.
+
+    Pasa cuando una fila pide «la marca más barata» y otra pide esa misma
+    marca: en pantalla son dos filas distintas, pero en esa ferretería
+    resuelven al mismo producto. La base no admite el mismo SKU dos veces en
+    una cotización, así que se suman aquí.
+
+    El monto no cambia: se suman los subtotales tal cual, y si las dos filas
+    tenían precios distintos, queda como precio negociado el promedio que
+    reproduce exactamente ese total.
+    """
+    unidas = {}
+    for d in detalle:
+        previa = unidas.get(d["id_sku"])
+        if previa is None:
+            unidas[d["id_sku"]] = {**d, "filas_unidas": 1}
+            continue
+
+        cantidad = previa["cantidad"] + d["cantidad"]
+        subtotal = round(previa["subtotal"] + d["subtotal"], 2)
+        precio_efectivo = round(subtotal / cantidad, 4)
+
+        previa.update({
+            "cantidad": cantidad,
+            "subtotal": subtotal,
+            "precio_manual": (None if abs(precio_efectivo - previa["precio_lista"]) < 0.0001
+                              else precio_efectivo),
+            "filas_unidas": previa["filas_unidas"] + 1,
+        })
+    return list(unidas.values())
+
+
 def cotizar_en_sedes(lineas: list[dict], sedes: list[dict],
                      precios: list[dict],
                      una_por_ferreteria: bool = True) -> list[dict]:
@@ -111,6 +144,8 @@ def cotizar_en_sedes(lineas: list[dict], sedes: list[dict],
                 "autorizado_por": linea.get("autorizado_por"),
                 "subtotal": subtotal,
             })
+
+        detalle = _unir_mismo_sku(detalle)
 
         resultados.append({
             "id_sede": sede["id_sede"],
