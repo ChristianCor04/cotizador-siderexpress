@@ -120,7 +120,19 @@ def _bloque_lista(usuario):
         "Ganadas": ["ganada"],
     }[estados]
 
-    negociaciones = db.negociaciones_del_asesor(usuario["id_usuario"], filtro)
+    # El supervisor y el master pueden ver las de su equipo. Antes la lista
+    # siempre filtraba por quien inició sesión, así que el supervisor no
+    # veía lo que hacían sus asesores.
+    solo_mias = True
+    if usuario["rol"] in ("supervisor", "master"):
+        alcance = st.segmented_control(
+            "Alcance", ["Equipo", "Mías"], default="Equipo",
+            label_visibility="collapsed", key="alcance_negociaciones",
+        ) or "Equipo"
+        solo_mias = alcance == "Mías"
+
+    negociaciones = db.negociaciones_del_asesor(usuario["id_usuario"], filtro,
+                                                solo_mias=solo_mias)
 
     if not negociaciones:
         st.caption("No hay negociaciones en este estado.")
@@ -147,6 +159,10 @@ def _tarjeta_negociacion(neg):
         if tickets:
             extra = f" (+{len(tickets) - 1})" if len(tickets) > 1 else ""
             st.caption(f"ID CRM {tickets[0]['ticket']}{extra}")
+
+        asesor = (neg.get("m_usuarios") or {}).get("nombre")
+        if asesor and neg.get("id_usuario") != st.session_state.usuario.get("id_usuario"):
+            st.caption(f"Asesor: {asesor}")
 
         if st.button("Abrir" if not activa else "Abierta", key=f"abrir_{neg['id_negociacion']}",
                      width="stretch", type="primary" if activa else "secondary",
@@ -1548,7 +1564,9 @@ def _tarjeta_venta(venta, usuario):
     st.caption(" · ".join(d for d in detalles if d) or "Sin comprobante")
 
     if venta["estado"] == "pendiente_validacion":
-        if usuario["rol"] in ("supervisor", "master"):
+        # El asesor valida sus propias ventas; el supervisor y el master
+        # también pueden. La base comprueba que cada uno toque solo lo suyo.
+        if usuario["rol"] in ("asesor", "supervisor", "master"):
             if st.button("Validar venta", key=f"validar_{venta['id_venta']}",
                          type="primary", width="stretch"):
                 try:
@@ -1557,7 +1575,7 @@ def _tarjeta_venta(venta, usuario):
                 except Exception as e:
                     st.error(f"No se pudo validar: {e}")
         else:
-            st.caption("Un supervisor debe validarla.")
+            st.caption("Tu usuario no puede validar ventas.")
 
     if venta["estado"] != "anulada":
         with st.expander("Anular venta"):

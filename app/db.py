@@ -335,6 +335,7 @@ def actualizar_cliente(id_cliente: int, datos: dict) -> dict:
 SELECT_NEGOCIACION = (
     "*, m_clientes(*, m_tipos_cliente(segmento, nombre)), "
     "m_distritos(nombre), "
+    "m_usuarios!fk_neg_usuario(nombre), "
     "rel_negociacion_tickets(ticket, tipo, fecha_ticket)"
 )
 
@@ -345,13 +346,20 @@ def negociacion_por_id(id_negociacion: int) -> dict | None:
     return filas[0] if filas else None
 
 
-def negociaciones_del_asesor(id_usuario: str, estados: list[str]) -> list[dict]:
-    """Las negociaciones del asesor. El RLS ya impide ver las de otros."""
-    # Se piden TODAS las columnas del cliente ("m_clientes(*)"): si se listan
-    # una por una, es fácil olvidar alguna y la app cree que el dato falta.
-    return conectar().table("fact_negociaciones").select(SELECT_NEGOCIACION) \
-        .eq("id_usuario", id_usuario).in_("estado", estados) \
-        .order("fecha_inicio", desc=True).execute().data
+def negociaciones_del_asesor(id_usuario: str, estados: list[str],
+                             solo_mias: bool = True) -> list[dict]:
+    """Negociaciones para la lista de la pantalla.
+
+    solo_mias=True: las del usuario que inició sesión.
+    solo_mias=False: todas las que el usuario puede ver. No hace falta filtrar
+    aquí por zona: el RLS de la base le da al supervisor las de sus zonas y
+    al master todas.
+    """
+    consulta = conectar().table("fact_negociaciones").select(SELECT_NEGOCIACION) \
+        .in_("estado", estados)
+    if solo_mias:
+        consulta = consulta.eq("id_usuario", id_usuario)
+    return consulta.order("fecha_inicio", desc=True).execute().data
 
 
 def crear_negociacion(datos: dict) -> dict:
@@ -726,3 +734,75 @@ def seguimiento_perdidas(desde, hasta) -> list[dict]:
 
 def seguimiento_ferreterias(desde, hasta) -> list[dict]:
     return _seguimiento("seguimiento_ferreterias", desde, hasta)
+
+
+# ===========================================================================
+# CATÁLOGO DE PRODUCTOS
+# Solo el master crea. El RLS y la función de la base lo imponen.
+# ===========================================================================
+
+def productos_resumen() -> list[dict]:
+    """Cada producto con cuántas marcas y SKU tiene."""
+    return conectar().table("v_productos_resumen").select("*") \
+        .order("producto").execute().data
+
+
+def marcas() -> list[dict]:
+    return conectar().table("m_marcas").select("id_marca, nombre") \
+        .order("nombre").execute().data
+
+
+def unidades() -> list[dict]:
+    return conectar().table("m_unidades_medida").select("id_unidad_medida, codigo, nombre") \
+        .order("nombre").execute().data
+
+
+def skus_de_producto(id_producto: int) -> list[dict]:
+    return conectar().table("v_catalogo_skus") \
+        .select("id_sku, marca, unidad, unidad_nombre, peso_kg, n_sedes") \
+        .eq("id_producto", id_producto).order("marca").execute().data
+
+
+def crear_producto_con_skus(datos: dict) -> dict:
+    """Crea producto, categoría, marcas, unidades y SKU en una sola operación.
+
+    Es todo o nada: si una presentación falla, no queda nada creado a medias.
+    """
+    return conectar().rpc("crear_producto_con_skus", {"p": datos}).execute().data
+
+
+def formato_cotizadores(desde, hasta) -> list[dict]:
+    """Cotizaciones y ventas en el formato histórico de los cotizadores.
+
+    Se trae por páginas: son una fila por producto, así que un mes supera
+    fácil las 1,000 filas que la API devuelve como máximo por consulta.
+    El orden es obligatorio para paginar: sin él, dos páginas podrían
+    repetir o saltarse filas.
+    """
+    filas, inicio, tamano = [], 0, 1000
+    while True:
+        pagina = conectar().table("v_formato_cotizadores").select("*") \
+            .gte("FECHA", str(desde)).lte("FECHA", str(hasta)) \
+            .order("FECHA").order("ACCION").order("orden_documento").order("ITEM") \
+            .range(inicio, inicio + tamano - 1).execute().data
+        filas.extend(pagina)
+        if len(pagina) < tamano:
+            break
+        inicio += tamano
+    return filas
+
+
+def uso_promocion(id_promocion: int) -> dict:
+    """Cuántas cotizaciones y ventas usaron la promoción."""
+    filas = conectar().rpc("uso_promocion", {"p_id_promocion": id_promocion}).execute().data
+    return filas[0] if filas else {"cotizaciones": 0, "cotizaciones_vigentes": 0, "ventas": 0}
+
+
+def editar_promocion(datos: dict) -> None:
+    """Edita datos, tramos y alcance en una sola operación."""
+    conectar().rpc("editar_promocion", {"p": datos}).execute()
+
+
+def eliminar_promocion(id_promocion: int) -> None:
+    """Elimina una promoción que nunca se usó. Si se usó, la base lo niega."""
+    conectar().rpc("eliminar_promocion", {"p_id_promocion": id_promocion}).execute()

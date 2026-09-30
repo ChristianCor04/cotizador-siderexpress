@@ -55,7 +55,12 @@ def mostrar(usuario: dict):
         _tabla_perdidas(perdidas)
 
     _tabla_ferreterias(ferreterias)
-    _exportar(desde, hasta, resumen, asesores, zonas, perdidas, ferreterias)
+
+    col_resumen, col_formato = st.columns(2)
+    with col_resumen:
+        _exportar(desde, hasta, resumen, asesores, zonas, perdidas, ferreterias)
+    with col_formato:
+        _exportar_formato_cotizadores(desde, hasta)
 
 
 # ==================================================== selector de fechas ===
@@ -103,9 +108,10 @@ def _pulso(r):
     c2.metric("Por cerrar", r.get("por_cerrar", 0))
     c3.metric("Ganadas", r.get("ganadas", 0))
     c4.metric("Perdidas", r.get("perdidas", 0))
+    total = sum(r.get(k, 0) or 0 for k in ("activas", "por_cerrar", "ganadas", "perdidas"))
     c5.metric("Conversión", f"{r.get('conversion_pct') or 0}%",
-              help=f"{r.get('ganadas', 0)} de {r.get('cerradas', 0)} cerradas. "
-                   "Las activas no cuentan porque todavía no se deciden.")
+              help=f"{r.get('ganadas', 0)} con venta de {total} negociaciones "
+                   "abiertas en el periodo, sin importar si siguen activas.")
     c6.metric("Facturación", f"S/ {float(r.get('facturacion') or 0):,.0f}",
               help=f"{r.get('ventas', 0)} ventas registradas · "
                    f"{config.soles(r.get('facturacion'))}")
@@ -256,3 +262,79 @@ def _exportar(desde, hasta, resumen, asesores, zonas, perdidas, ferreterias):
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         width="stretch",
     )
+
+
+# ================================================= formato histórico ===
+def _exportar_formato_cotizadores(desde, hasta):
+    """Cotizaciones y ventas en el formato del cotizador anterior.
+
+    Una fila por producto. ID 3-n es cotización y 4-n es venta; en las
+    ventas, COTIZACION_ORIGEN dice de qué cotización salieron.
+    """
+    # Se genera solo cuando se pide: con muchos meses pueden ser miles de
+    # filas y no vale la pena consultarlas en cada recarga de la pantalla.
+    clave = f"formato_{desde}_{hasta}"
+    if st.session_state.get("formato_clave") != clave:
+        st.session_state.formato_archivo = None
+
+    if st.session_state.get("formato_archivo") is None:
+        if st.button("Preparar formato cotizadores", width="stretch",
+                     help="Cotizaciones y ventas del periodo, una fila por producto, "
+                          "con las columnas del cotizador anterior."):
+            with st.spinner("Armando el archivo…"):
+                filas = db.formato_cotizadores(desde, hasta)
+                st.session_state.formato_archivo = _excel_formato(filas)
+                st.session_state.formato_filas = len(filas)
+                st.session_state.formato_clave = clave
+            st.rerun()
+        return
+
+    st.download_button(
+        f"⬇ Formato cotizadores · {st.session_state.formato_filas:,} filas",
+        data=st.session_state.formato_archivo,
+        file_name=f"formato_cotizadores_{desde}_{hasta}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        width="stretch",
+    )
+
+
+# El orden exacto del formato histórico. Se fija aquí para no depender del
+# orden en que lleguen los datos.
+COLUMNAS_FORMATO = [
+    "ID", "FECHA", "CLIENTE", "DOCUMENTO", "DEPARTAMENTO", "PROVINCIA",
+    "DISTRITO", "ITEM", "Categoria", "Marca", "Producto", "id", "Um",
+    "Precio", "Cantidad", "Precio Total", "TC", "DISTRIBUIDOR",
+    "PRECIO_FECO", "TIPO_CLIENTE", "ACCION", "TELEFONO", "TIPO_PAGO",
+    "TICKET", "COTIZACION_ORIGEN",
+]
+
+
+def _excel_formato(filas) -> bytes:
+    tabla = pd.DataFrame(filas)
+    if tabla.empty:
+        tabla = pd.DataFrame(columns=COLUMNAS_FORMATO)
+    else:
+        # El ID es texto: ordenado como texto quedaría 3-1, 3-10, 3-2.
+        # Por eso se ordena con la columna auxiliar, que después no se exporta.
+        tabla = tabla.sort_values(["FECHA", "ACCION", "orden_documento", "ITEM"])
+        tabla = tabla[COLUMNAS_FORMATO]
+        tabla["FECHA"] = pd.to_datetime(tabla["FECHA"]).dt.date
+
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        tabla.to_excel(writer, sheet_name="Formato", index=False)
+        hoja = writer.sheets["Formato"]
+        hoja.freeze_panes = "A2"
+        for celda in hoja[1]:
+            celda.font = celda.font.copy(bold=True)
+        for i, columna in enumerate(tabla.columns, start=1):
+            ancho = max(10, min(40, len(str(columna)) + 4))
+            if columna in ("CLIENTE", "Producto", "id", "DISTRITO"):
+                ancho = 28
+            from openpyxl.utils import get_column_letter
+            hoja.column_dimensions[get_column_letter(i)].width = ancho
+        # Fecha en formato peruano
+        for fila in hoja.iter_rows(min_row=2, min_col=2, max_col=2):
+            for celda in fila:
+                celda.number_format = "DD/MM/YYYY"
+    return buffer.getvalue()

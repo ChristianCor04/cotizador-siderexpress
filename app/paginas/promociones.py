@@ -57,6 +57,10 @@ def mostrar(usuario: dict):
 
 # =========================================================== 1. LA LISTA ===
 def _lista():
+    mensaje = st.session_state.pop("promo_mensaje", None)
+    if mensaje:
+        st.success(mensaje["texto"])
+
     todas = db.promociones()
     if not todas:
         st.caption("Todavía no hay promociones. Créala en la pestaña de al lado.")
@@ -136,31 +140,186 @@ def _detalle(promo):
                        else config.soles(t["valor"])),
             } for t in tramos]), hide_index=True, width="stretch")
 
-    col_apagar, col_fecha = st.columns(2)
+    uso = db.uso_promocion(promo["id_promocion"])
+    st.caption(f"Usada en {uso['cotizaciones']} cotización(es) y {uso['ventas']} venta(s).")
 
+    accion = st.segmented_control(
+        "Acción", ["Editar", "Apagar o reactivar", "Eliminar"],
+        key=f"accion_{promo['id_promocion']}", label_visibility="collapsed",
+    )
+
+    if accion == "Editar":
+        _editar(promo, uso)
+    elif accion == "Apagar o reactivar":
+        _apagar(promo)
+    elif accion == "Eliminar":
+        _eliminar(promo, uso)
+
+
+def _apagar(promo):
     if promo["activo"]:
-        if col_apagar.button("Apagar promoción", key=f"apagar_{promo['id_promocion']}",
-                             width="stretch",
-                             help="No se borra: deja de aplicarse y las cotizaciones "
-                                  "antiguas la siguen mostrando."):
+        st.caption("Deja de aplicarse de inmediato. Las cotizaciones antiguas la "
+                   "siguen mostrando y se puede reactivar.")
+        if st.button("Apagar promoción", key=f"apagar_{promo['id_promocion']}",
+                     width="stretch"):
             db.actualizar_promocion(promo["id_promocion"], {"activo": False})
             st.rerun()
     else:
-        if col_apagar.button("Reactivar", key=f"prender_{promo['id_promocion']}",
-                             width="stretch"):
+        if st.button("Reactivar", key=f"prender_{promo['id_promocion']}", width="stretch"):
             db.actualizar_promocion(promo["id_promocion"], {"activo": True})
             st.rerun()
 
-    nueva_fecha = col_fecha.date_input(
-        "Vence el", value=date.fromisoformat(promo["vigente_hasta"][:10]),
-        key=f"fecha_{promo['id_promocion']}",
-    )
-    if nueva_fecha.isoformat() != promo["vigente_hasta"][:10]:
-        if col_fecha.button("Cambiar fecha", key=f"guardar_fecha_{promo['id_promocion']}",
-                            width="stretch"):
-            db.actualizar_promocion(promo["id_promocion"],
-                                    {"vigente_hasta": f"{nueva_fecha}T23:59:59"})
+
+def _eliminar(promo, uso):
+    """Solo se elimina lo que nunca se usó."""
+    usada = uso["cotizaciones"] > 0 or uso["ventas"] > 0
+    if usada:
+        st.warning(
+            f"No se puede eliminar: ya se usó en {uso['cotizaciones']} cotización(es) "
+            f"y {uso['ventas']} venta(s). Borrarla dejaría esas operaciones sin su "
+            "promoción. Apágala en su lugar."
+        )
+        return
+
+    st.caption("Se borra por completo, con sus tramos y afiliaciones. No se puede deshacer.")
+    confirmacion = st.text_input(f"Escribe «{promo['codigo']}» para confirmar",
+                                 key=f"conf_borrar_{promo['id_promocion']}")
+    if st.button("Eliminar definitivamente", type="primary", width="stretch",
+                 disabled=confirmacion.strip() != promo["codigo"],
+                 key=f"borrar_{promo['id_promocion']}"):
+        try:
+            db.eliminar_promocion(promo["id_promocion"])
+            st.session_state.promo_mensaje = {"texto": f"Promoción {promo['codigo']} eliminada."}
             st.rerun()
+        except Exception as e:
+            st.error(_error(e))
+
+
+def _editar(promo, uso):
+    """Todo se puede cambiar salvo código, tipo, modalidad y momento."""
+    pid = promo["id_promocion"]
+    st.caption(f"`{promo['codigo']}` · {TIPOS[promo['tipo']]} · "
+               f"{MODALIDADES[promo['modalidad']].split(' · ')[0]}. "
+               "Estos datos no se editan: si hay que cambiarlos, es otra promoción.")
+
+    if uso["cotizaciones_vigentes"]:
+        st.info(f"Hay {uso['cotizaciones_vigentes']} cotización(es) vigentes con esta "
+                "promoción. Conservan el beneficio con que salieron; el cambio aplica "
+                "a las nuevas.")
+
+    nombre = st.text_input("Nombre", value=promo["nombre"], key=f"e_nom_{pid}")
+    descripcion = st.text_input("Descripción", value=promo.get("descripcion") or "",
+                                key=f"e_desc_{pid}")
+
+    datos = {"id_promocion": pid, "nombre": nombre.strip(),
+             "descripcion": descripcion.strip() or None,
+             "valor": promo.get("valor"), "base_bloque": promo.get("base_bloque")}
+
+    # --- Qué da
+    if promo["tipo"] == "porcentaje":
+        datos["valor"] = st.number_input("Porcentaje", min_value=0.1, max_value=100.0,
+                                         value=float(promo["valor"] or 1), step=0.5,
+                                         key=f"e_val_{pid}")
+    elif promo["tipo"] in ("monto_fijo", "precio_especial"):
+        datos["valor"] = st.number_input("Monto", min_value=0.01,
+                                         value=float(promo["valor"] or 1), step=5.0,
+                                         key=f"e_val_{pid}")
+    elif promo["tipo"] == "por_bloques":
+        c1, c2 = st.columns(2)
+        datos["base_bloque"] = c1.number_input("Por cada (S/)", min_value=1.0,
+                                               value=float(promo["base_bloque"] or 1000),
+                                               step=100.0, key=f"e_base_{pid}")
+        datos["valor"] = c2.number_input("Da (S/)", min_value=0.01,
+                                         value=float(promo["valor"] or 10), step=5.0,
+                                         key=f"e_val_{pid}")
+    elif promo["tipo"] == "escalonada":
+        datos["tramos"] = _editar_tramos(pid)
+
+    # --- Cuándo y cuánto
+    c1, c2 = st.columns(2)
+    desde = c1.date_input("Desde", value=date.fromisoformat(promo["vigente_desde"][:10]),
+                          key=f"e_desde_{pid}")
+    hasta = c2.date_input("Hasta", value=date.fromisoformat(promo["vigente_hasta"][:10]),
+                          key=f"e_hasta_{pid}")
+    c3, c4 = st.columns(2)
+    minimo = c3.number_input("Compra mínima (S/)", min_value=0.0,
+                             value=float(promo.get("monto_minimo") or 0), step=100.0,
+                             key=f"e_min_{pid}", help="0 = sin mínimo")
+    tope = c4.number_input("Tope (S/)", min_value=0.0,
+                           value=float(promo.get("tope_beneficio") or 0), step=50.0,
+                           key=f"e_tope_{pid}", help="0 = sin tope")
+
+    # --- Cómo se aplica
+    c5, c6, c7 = st.columns(3)
+    aplicacion = c5.selectbox("Cómo llega", list(APLICACIONES),
+                              index=list(APLICACIONES).index(promo["aplicacion"]),
+                              format_func=lambda a: APLICACIONES[a].split(" · ")[0],
+                              key=f"e_apl_{pid}")
+    acumulable = c6.checkbox("Acumulable", value=promo["acumulable"], key=f"e_acu_{pid}")
+    afiliacion = c7.checkbox("Requiere afiliación", value=promo["requiere_afiliacion"],
+                             key=f"e_afi_{pid}")
+
+    datos.update({
+        "vigente_desde": f"{desde}T00:00:00",
+        "vigente_hasta": f"{hasta}T23:59:59",
+        "monto_minimo": minimo or None,
+        "tope_beneficio": tope or None,
+        "aplicacion": aplicacion,
+        "acumulable": acumulable,
+        "requiere_afiliacion": afiliacion,
+        # Las condiciones de cliente se conservan tal cual estaban
+        "segmento_cliente": promo.get("segmento_cliente"),
+        "compras_previas_min": promo.get("compras_previas_min"),
+        "compras_previas_max": promo.get("compras_previas_max"),
+        "dias_sin_comprar_min": promo.get("dias_sin_comprar_min"),
+    })
+
+    error = None
+    if not nombre.strip():
+        error = "Falta el nombre."
+    elif hasta <= desde:
+        error = "La fecha de fin debe ser posterior a la de inicio."
+    elif promo["tipo"] == "escalonada" and not datos.get("tramos"):
+        error = "Una promoción escalonada necesita al menos un tramo."
+
+    if st.button("Guardar cambios", type="primary", width="stretch",
+                 disabled=bool(error), key=f"e_guardar_{pid}"):
+        try:
+            db.editar_promocion(datos)
+            st.session_state.pop(f"tramos_edit_{pid}", None)
+            st.session_state.promo_mensaje = {"texto": f"Promoción {promo['codigo']} actualizada."}
+            st.rerun()
+        except Exception as e:
+            st.error(_error(e))
+    if error:
+        st.caption(f":orange[{error}]")
+
+
+def _editar_tramos(pid) -> list[dict]:
+    """Tramos de una escalonada, precargados con los actuales."""
+    clave = f"tramos_edit_{pid}"
+    if clave not in st.session_state:
+        st.session_state[clave] = [{
+            "monto_desde": float(t["monto_desde"]),
+            "monto_hasta": float(t["monto_hasta"]) if t["monto_hasta"] else None,
+            "tipo_valor": t["tipo_valor"],
+            "valor": float(t["valor"]),
+        } for t in db.tramos_de(pid)]
+
+    st.caption("Tramos · «Hasta» en 0 significa de ahí en adelante")
+    for i, tramo in enumerate(st.session_state[clave]):
+        c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
+        tramo["monto_desde"] = c1.number_input("Desde", value=tramo["monto_desde"],
+                                               step=500.0, key=f"et_d_{pid}_{i}")
+        hasta = c2.number_input("Hasta", value=float(tramo["monto_hasta"] or 0),
+                                step=500.0, key=f"et_h_{pid}_{i}")
+        tramo["monto_hasta"] = None if hasta == 0 else hasta
+        tramo["tipo_valor"] = c3.selectbox("Tipo", ["porcentaje", "monto_fijo"],
+                                           index=0 if tramo["tipo_valor"] == "porcentaje" else 1,
+                                           key=f"et_t_{pid}_{i}")
+        tramo["valor"] = c4.number_input("Da", value=tramo["valor"], step=0.5,
+                                         key=f"et_v_{pid}_{i}")
+    return st.session_state[clave]
 
 
 def _texto_condiciones(promo) -> str:
@@ -447,6 +606,10 @@ def _error(e) -> str:
         return "El valor no corresponde al tipo elegido. Revisa el porcentaje o el monto."
     if "chk_promo_fechas" in detalle:
         return "La fecha de fin debe ser posterior a la de inicio."
+    if "ya se usó en" in detalle:
+        return detalle.split("CONTEXT")[0].split("'message': '")[-1].split("',")[0]
+    if "Solo el administrador" in detalle:
+        return "Solo el administrador puede modificar promociones."
     if "permission denied" in detalle or "row-level security" in detalle:
         return "Tu usuario no tiene permiso para crear promociones."
     return f"No se pudo crear: {e}"

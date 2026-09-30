@@ -11,6 +11,7 @@ logica/
   cotizacion.py            Reglas de negocio: a qué ferreterías se pide precio.
   pdf.py                   Cómo se ve el PDF de la cotización.
   precios_excel.py         Plantilla de precios y lectura del Excel cargado.
+  catalogo.py              Detecta nombres parecidos para evitar duplicados.
 sesion.py                  Mantiene la sesión al recargar la página (F5).
 assets/logo.png            Logo de la marca. Se usa en la app y en el PDF.
 paginas/
@@ -18,6 +19,7 @@ paginas/
   negociaciones.py         Pantalla principal (lista + materiales + ferreterías).
   precios.py               Estado diario de precios, edición y carga por Excel.
   promociones.py           Crear promociones y registrar afiliaciones (solo master).
+  productos.py             Crear productos, marcas y SKU (solo master).
 ```
 
 ## Dónde tocar según lo que quieras cambiar
@@ -319,3 +321,35 @@ cliente de Chiclayo no ensucia los reportes por zona.
 
 Eso importa para el supervisor, que ve las negociaciones **de todas sus
 zonas**. El asesor ve las suyas esté donde esté la obra.
+
+
+## Crear productos
+
+Solo el master. Un SKU es producto + marca + unidad, y la pantalla crea
+todo de una vez: el producto, su categoría, las marcas y unidades que
+falten, y los SKU. Es todo o nada.
+
+**Aviso de parecidos.** Al escribir un nombre, compara con lo existente
+ignorando mayúsculas, tildes, espacios y signos. «BC 6 mm» y «BC 6mm» son el
+mismo; «BC 1/2"» y «BC 3/4"» no. Si encuentra uno idéntico, bloquea la
+creación y ofrece agregarle la marca al existente. Con marcas y unidades,
+si ya existe, la reutiliza en vez de crear otra.
+
+**El peso es obligatorio** en las categorías que suman toneladas.
+
+**Para abrirlo a otros roles** hay que cambiar dos cosas: el menú en
+`app.py` y la comprobación de rol en la función `crear_producto_con_skus`
+de la base. La recomendación es que las categorías queden siempre en el
+master, porque agrupan los reportes y definen qué suma en toneladas.
+
+
+## Editar y eliminar promociones
+
+**Editar:** todo salvo código, tipo, modalidad y momento, porque cambiar eso
+es otra promoción distinta. Las cotizaciones ya emitidas conservan el
+beneficio con que salieron; el cambio aplica a las nuevas. Cada edición deja
+la versión anterior en `h_promociones`.
+
+**Eliminar:** solo si nunca se usó. Una promoción aplicada en cotizaciones o
+ventas no se puede borrar sin dejar esas operaciones sin su promoción; esas
+se apagan. Para eliminar pide escribir el código como confirmación.
