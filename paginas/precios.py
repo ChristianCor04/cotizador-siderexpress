@@ -311,10 +311,11 @@ def _tabla_precios(nombre, sedes, catalogo, precios):
             if distintos:
                 st.caption(f"⚠ {distintos} producto(s) con precio diferente entre sedes.")
 
+        etiquetas = _etiquetas_sedes(sedes)
         for sede in sedes:
             configuracion[sede["codigo"]] = st.column_config.NumberColumn(
-                sede["codigo"], min_value=0.0001, step=0.0001, format="%.4f",
-                help=f"{sede['nombre']} · vacío = no lo vende",
+                etiquetas[sede["codigo"]], min_value=0.0001, step=0.0001, format="%.4f",
+                help=f"{sede['codigo']} · vacío = no lo vende",
             )
 
     editada = st.data_editor(
@@ -342,6 +343,33 @@ def _tabla_precios(nombre, sedes, catalogo, precios):
                 st.rerun()
             except Exception as e:
                 st.error(f"No se pudo guardar: {e}")
+
+
+def _etiquetas_sedes(sedes) -> dict:
+    """Título de cada columna de la tabla: el nombre de la sede.
+
+    La columna sigue identificándose por el código por dentro, porque es lo
+    que usa el guardado. Si dos sedes se llaman igual, como pasa con las
+    sedes de cobertura, se les agrega el distrito, y si aun así se repiten,
+    el código.
+    """
+    def distrito(sede):
+        return ((sede.get("m_distritos") or {}).get("nombre") or "").replace("_", " ").title()
+
+    nombres = [s["nombre"] for s in sedes]
+    etiquetas = {}
+    for sede in sedes:
+        etiqueta = sede["nombre"]
+        if nombres.count(sede["nombre"]) > 1 and distrito(sede):
+            etiqueta = f"{sede['nombre']} · {distrito(sede)}"
+        etiquetas[sede["codigo"]] = etiqueta
+
+    # Si todavía hay repetidas, el código las desempata
+    valores = list(etiquetas.values())
+    for codigo, etiqueta in etiquetas.items():
+        if valores.count(etiqueta) > 1:
+            etiquetas[codigo] = f"{etiqueta} ({codigo})"
+    return etiquetas
 
 
 def _productos_con_precio_distinto(sedes, precios) -> int:

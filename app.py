@@ -15,7 +15,7 @@ import config                                # noqa: E402
 import db                                    # noqa: E402
 import sesion                                # noqa: E402
 from paginas import (login, negociaciones, precios,  # noqa: E402
-                     promociones, seguimiento)
+                     productos, promociones, seguimiento)
 
 
 # Qué pantallas ve cada rol.
@@ -24,7 +24,7 @@ MENU = {
     "asesor":     ["Negociaciones", "Precios"],
     "supervisor": ["Negociaciones", "Seguimiento", "Precios",
                    "Ferreterías", "Clientes"],
-    "master":     ["Negociaciones", "Seguimiento", "Precios",
+    "master":     ["Negociaciones", "Seguimiento", "Precios", "Productos",
                    "Ferreterías", "Clientes", "Promociones"],
 }
 
@@ -81,6 +81,8 @@ def main():
         promociones.mostrar(usuario)
     elif pantalla == "Seguimiento":
         seguimiento.mostrar(usuario)
+    elif pantalla == "Productos":
+        productos.mostrar(usuario)
     else:
         st.info(f"La pantalla «{pantalla}» todavía no está construida.")
 
