@@ -194,6 +194,10 @@ def _filtros_geograficos(estado):
 
 # ------------------------------------------------------------------ derecha
 def _panel_ferreteria(usuario, estado):
+    mensaje = st.session_state.pop("mensaje_precios", None)
+    if mensaje:
+        st.success(mensaje)
+
     id_ferreteria = st.session_state.precios_ferreteria
     if id_ferreteria is None:
         st.info("Elige una ferretería de la lista para ver y editar sus precios.")
@@ -214,13 +218,140 @@ def _panel_ferreteria(usuario, estado):
     if st.session_state.precio_unico is None:
         st.session_state.precio_unico = precios_iguales_en_sedes(sedes, precios)
 
+    # Los precios de fierro calculados desde la tonelada no se editan a mano:
+    # el próximo tipo de cambio los pisaría. Se guardan aquí para que la
+    # tabla y la carga de Excel los dejen fuera.
+    st.session_state.precios_calculados = db.precios_calculados(
+        [s["id_sede"] for s in sedes])
+
     with st.container(border=True):
         _cabecera_panel(nombre, sedes_estado, id_ferreteria)
         st.divider()
+        _bloque_fierro_tonelada(usuario, id_ferreteria, sedes)
         _selector_modo(sedes)
+        if st.session_state.precios_calculados:
+            st.caption(f"🔒 {len(st.session_state.precios_calculados)} precio(s) de fierro "
+                       "se calculan desde la tonelada en dólares. Si los cambias en la "
+                       "tabla, no se guardan.")
         _tabla_precios(nombre, sedes, catalogo, precios)
         st.divider()
         _bloque_excel(nombre, sedes, catalogo, precios)
+
+
+def _bloque_fierro_tonelada(usuario, id_ferreteria, sedes):
+    """Precio del fierro corrugado por tonelada en dólares.
+
+    Con el precio de la tonelada y el tipo de cambio, la base calcula el
+    precio en soles de cada varilla y de la tonelada:
+        varilla  = tonelada US$ × tipo de cambio ÷ varillas por tonelada
+    """
+    actuales = db.precios_tonelada(id_ferreteria)
+    tc = db.tipo_cambio_actual()
+
+    with st.expander(f"Fierro por tonelada (US$){' · activo' if actuales else ''}",
+                     expanded=bool(actuales)):
+        _linea_tipo_cambio(tc, usuario)
+
+        if actuales:
+            st.dataframe([{
+                "Marca": a["marca"],
+                "Aplica a": a["sede"],
+                "US$ / tonelada": float(a["precio_usd"]),
+                "S/ / tonelada": float(a["precio_tonelada_soles"] or 0),
+            } for a in actuales], hide_index=True, width="stretch",
+                column_config={
+                    "US$ / tonelada": st.column_config.NumberColumn(format="$ %.2f"),
+                    "S/ / tonelada": st.column_config.NumberColumn(format="S/ %.2f"),
+                })
+            col_q, col_b = st.columns([3, 1], vertical_alignment="bottom")
+            quitar = col_q.selectbox(
+                "Quitar", [None] + actuales, index=0, label_visibility="collapsed",
+                format_func=lambda a: "Elige uno para quitarlo…" if a is None
+                else f"{a['marca']} · {a['sede']}", key=f"ton_quitar_{id_ferreteria}")
+            if col_b.button("Quitar", width="stretch", disabled=quitar is None,
+                            key=f"ton_btn_quitar_{id_ferreteria}"):
+                db.quitar_precio_tonelada(quitar["id_precio_tonelada"])
+                _refrescar_precios("Precio por tonelada quitado. Los precios quedan, "
+                                   "ahora editables a mano.")
+
+        st.markdown("**Registrar o actualizar**")
+        marcas = db.marcas_fierro()
+        if not marcas:
+            st.caption("No hay fierro corrugado con rendimiento cargado.")
+            return
+
+        col_m, col_s, col_p = st.columns([1.2, 1.4, 1])
+        marca = col_m.selectbox("Marca", marcas, format_func=lambda m: m["nombre"],
+                                key=f"ton_marca_{id_ferreteria}")
+        opciones_sede = [None] + sedes
+        sede = col_s.selectbox(
+            "Aplica a", opciones_sede,
+            format_func=lambda s: "Todas las sedes" if s is None else s["nombre"],
+            key=f"ton_sede_{id_ferreteria}",
+            help="Si una sede tiene un precio distinto, regístralo aparte: "
+                 "manda sobre el de «Todas las sedes».")
+        precio = col_p.number_input("US$ por tonelada", min_value=0.0, step=5.0,
+                                    format="%.2f", key=f"ton_precio_{id_ferreteria}")
+
+        if precio and tc:
+            _vista_previa_fierro(precio, float(tc["valor"]))
+
+        if st.button("Guardar precio por tonelada", type="primary", width="stretch",
+                     disabled=not (precio and tc), key=f"ton_guardar_{id_ferreteria}"):
+            try:
+                n = db.guardar_precio_tonelada(
+                    id_ferreteria, sede["id_sede"] if sede else None,
+                    marca["id_marca"], float(precio))
+                _refrescar_precios(f"Guardado: {n} precio(s) de fierro recalculados en soles.")
+            except Exception as e:
+                st.error(f"No se pudo guardar: {e}")
+        if not tc:
+            st.caption(":orange[Falta registrar el tipo de cambio para poder calcular.]")
+
+
+def _linea_tipo_cambio(tc, usuario):
+    """El tipo de cambio vigente. Lo carga el script; aquí solo se muestra."""
+    from datetime import date
+    if not tc:
+        st.warning("No hay tipo de cambio registrado todavía.")
+    else:
+        fecha = date.fromisoformat(tc["fecha"])
+        texto = (f"Tipo de cambio: **S/ {float(tc['valor']):.4f}** por dólar · "
+                 f"del {fecha.strftime('%d/%m/%Y')} · fuente: {tc['fuente']}")
+        if fecha < config.hoy_lima():
+            st.warning(texto + ". No se registró el de hoy: se está usando el último disponible.")
+        else:
+            st.caption(texto)
+
+    # Respaldo manual por si el script falla un día. Solo el master.
+    if usuario["rol"] == "master":
+        with st.popover("Registrar tipo de cambio a mano"):
+            valor = st.number_input("S/ por dólar", min_value=0.0, step=0.001,
+                                    format="%.4f", key="tc_manual")
+            if st.button("Registrar para hoy", disabled=not valor, key="tc_manual_btn"):
+                db.registrar_tipo_cambio(config.hoy_lima(), float(valor))
+                _refrescar_precios("Tipo de cambio registrado. Los precios de fierro "
+                                   "se recalcularon.")
+
+
+def _vista_previa_fierro(precio_usd: float, tc: float):
+    """Cómo quedarían los precios con este precio de tonelada."""
+    filas = [{
+        "Medida": r["medida"],
+        "Varillas por t": float(r["varillas_por_tonelada"]),
+        "S/ por varilla": round(precio_usd * tc / float(r["varillas_por_tonelada"]), 4),
+    } for r in db.rendimientos_fierro()]
+    st.caption(f"Vista previa · tonelada a S/ {precio_usd * tc:,.2f}")
+    st.dataframe(filas, hide_index=True, width="stretch",
+                 column_config={"S/ por varilla": st.column_config.NumberColumn(format="S/ %.4f")})
+
+
+def _refrescar_precios(mensaje: str):
+    db.limpiar_cache()
+    st.session_state.precios_tabla = None
+    st.session_state.precios_version += 1
+    st.session_state.mensaje_precios = mensaje
+    st.rerun()
 
 
 def _cabecera_panel(nombre, sedes_estado, id_ferreteria):
@@ -402,6 +533,8 @@ def _detectar_cambios(original, editada, sedes, unico=False) -> list[dict]:
             if pd.isna(antes) or round(float(antes), 4) != round(float(ahora), 4):
                 destinos = ([s["id_sede"] for s in sedes] if id_sede is None
                             else [id_sede])
+                calculados = st.session_state.get("precios_calculados") or set()
+                destinos = [d for d in destinos if (d, id_sku) not in calculados]
                 for destino in destinos:
                     cambios.append({
                         "id_sede": destino,
@@ -505,8 +638,10 @@ def _resumen_carga(lectura, comparacion, nombre):
     if st.button("Aplicar cambios", type="primary", width="stretch",
                  disabled=not habilitado):
         try:
+            calculados = st.session_state.get("precios_calculados") or set()
             limpios = [{k: v for k, v in p.items() if not k.startswith("_")}
-                       for p in lectura["precios"]]
+                       for p in lectura["precios"]
+                       if (p["id_sede"], p["id_sku"]) not in calculados]
             resultado = db.guardar_precios(limpios, modo=modo)
             db.limpiar_cache()
             st.session_state.precios_tabla = None

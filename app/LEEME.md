@@ -14,6 +14,7 @@ logica/
   catalogo.py              Detecta nombres parecidos para evitar duplicados.
 sesion.py                  Mantiene la sesión al recargar la página (F5).
 assets/logo.png            Logo de la marca. Se usa en la app y en el PDF.
+assets/logo_blanco.png     Versión blanca, para la franja roja del pie del PDF.
 paginas/
   login.py                 Pantalla de login.
   negociaciones.py         Pantalla principal (lista + materiales + ferreterías).
@@ -353,3 +354,85 @@ la versión anterior en `h_promociones`.
 **Eliminar:** solo si nunca se usó. Una promoción aplicada en cotizaciones o
 ventas no se puede borrar sin dejar esas operaciones sin su promoción; esas
 se apagan. Para eliminar pide escribir el código como confirmación.
+
+
+## Textos del final del PDF
+
+Las condiciones, las formas de pago, la nota, el contacto y la despedida
+están al inicio de `logica/pdf.py`, en las constantes `CONDICIONES`,
+`FORMAS_DE_PAGO`, `NOTA`, `CONTACTO` y `DESPEDIDA`. Para cambiar un texto,
+edita solo ahí. En las condiciones, `{vence}` se reemplaza solo por la fecha
+de vencimiento de la cotización.
+
+El teléfono y la web de la franja roja del pie salen de `CONTACTO`, así que
+cambian en los dos lugares a la vez.
+
+Si cambias el logo, regenera también `logo_blanco.png`: es el mismo dibujo
+en blanco, para que se vea sobre el rojo.
+
+
+## Semáforo de negociaciones
+
+La regla está en la base, en `v_negociaciones_semaforo`:
+
+| Estado | Regla |
+|---|---|
+| Azul, tarjeta pintada | Venta registrada sin validar |
+| Verde | Cotizó hoy |
+| Sin color | 1 o 2 días sin cotizar |
+| Amarillo | 3 a 6 días sin cotizar |
+| Rojo | 7 días o más sin cotizar |
+
+Los días se cuentan en fechas de Lima. Si nunca cotizó, desde que se abrió.
+Los colores se cambian en `SEMAFORO`, al inicio de la sección de la lista en
+`paginas/negociaciones.py`.
+
+## Ícono de la pestaña
+
+`assets/icono.png` si existe; si no, el logo. Conviene un PNG cuadrado.
+
+
+## Fierro por tonelada en dólares
+
+Algunas ferreterías dan el fierro corrugado por tonelada en dólares. En
+Precios, dentro de cada ferretería, el bloque «Fierro por tonelada (US$)»
+registra ese precio por marca, para todas las sedes o para una en particular.
+La base calcula los precios en soles:
+
+    varilla   = tonelada US$ × tipo de cambio ÷ varillas por tonelada
+    tonelada  = tonelada US$ × tipo de cambio
+
+Sin IGV. El rendimiento de cada medida está en `m_productos.varillas_por_tonelada`.
+
+**El tipo de cambio lo registra un script** (`scripts/tipo_cambio_a_supabase.py`)
+una vez al día. Al registrarlo, se recalculan solos todos los precios de fierro
+por tonelada. La pantalla solo lo muestra, y avisa si no es del día. El master
+tiene un respaldo para registrarlo a mano si el script falla.
+
+**Esos precios quedan bloqueados**: la tabla y la carga de Excel no los
+modifican, porque el siguiente tipo de cambio los pisaría. Para editarlos a
+mano, primero hay que quitar el precio por tonelada.
+
+Las cotizaciones y ventas guardan el tipo de cambio del día, así que la
+columna TC del formato de cotizadores ya sale llena.
+
+
+## Ferreterías y sedes
+
+Pantalla Ferreterías, para supervisor y master. Lista, mapa y formularios.
+
+**Código de sede automático:** prefijo de la zona + siguiente número libre.
+Los prefijos viven en `m_zonas.prefijo_sede`: TRUJ, CIX, AQP, LIM, CUZ. El
+código no se edita porque es la llave de la plantilla de Excel.
+
+**Distrito automático:** sale de las coordenadas, también al editar una sede.
+
+**Permisos:** el supervisor crea ferreterías y crea o edita sedes solo en sus
+zonas. Abrir una zona nueva es del master: desde el formulario de sede, si las
+coordenadas caen en una provincia sin zona, aparece la opción de abrirla con
+su prefijo; la zona toma todos los distritos libres de esa provincia.
+
+**Nada se borra:** ferreterías y sedes se desactivan.
+
+**El mapa** usa el mapa base gratuito de Carto, sin cuenta de Google. Al
+hacer clic en un punto se selecciona su ferretería.

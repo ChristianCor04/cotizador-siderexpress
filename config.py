@@ -14,6 +14,8 @@ from supabase import create_client
 
 # Logo de la marca. Para cambiarlo, reemplaza el archivo manteniendo el nombre.
 LOGO = str(Path(__file__).parent / "assets" / "logo.png")
+# Versión blanca, para la franja roja del pie del PDF
+LOGO_BLANCO = str(Path(__file__).parent / "assets" / "logo_blanco.png")
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +92,11 @@ LIMA = ZoneInfo("America/Lima")
 
 def ahora_lima() -> datetime:
     return datetime.now(LIMA)
+
+
+def hoy_lima():
+    """La fecha de hoy en Perú. El servidor está en otra zona horaria."""
+    return ahora_lima().date()
 
 
 def a_lima(valor) -> datetime | None:

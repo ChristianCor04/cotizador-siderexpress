@@ -806,3 +806,176 @@ def editar_promocion(datos: dict) -> None:
 def eliminar_promocion(id_promocion: int) -> None:
     """Elimina una promoción que nunca se usó. Si se usó, la base lo niega."""
     conectar().rpc("eliminar_promocion", {"p_id_promocion": id_promocion}).execute()
+
+
+def semaforo_de(ids_negociacion: list[int]) -> dict:
+    """Estado de seguimiento de cada negociación: {id: fila}."""
+    if not ids_negociacion:
+        return {}
+    filas = conectar().table("v_negociaciones_semaforo") \
+        .select("id_negociacion, dias_sin_cotizar, semaforo") \
+        .in_("id_negociacion", ids_negociacion).execute().data
+    return {f["id_negociacion"]: f for f in filas}
+
+
+# ===========================================================================
+# FIERRO POR TONELADA EN DÓLARES
+# El cálculo lo hace la base (recalcular_precios_fierro). Aquí solo se lee y
+# se registra el precio de la tonelada.
+# ===========================================================================
+
+def tipo_cambio_actual() -> dict | None:
+    """El tipo de cambio más reciente. Lo registra el script automático."""
+    filas = conectar().table("m_tipo_cambio").select("*") \
+        .order("fecha", desc=True).limit(1).execute().data
+    return filas[0] if filas else None
+
+
+def registrar_tipo_cambio(fecha, valor: float) -> None:
+    """Respaldo manual por si el script no corrió. Solo el master."""
+    conectar().table("m_tipo_cambio").upsert(
+        {"fecha": str(fecha), "valor": valor, "fuente": "manual"},
+        on_conflict="fecha").execute()
+
+
+def precios_tonelada(id_ferreteria: int) -> list[dict]:
+    return conectar().table("v_precios_tonelada").select("*") \
+        .eq("id_ferreteria", id_ferreteria).order("marca").execute().data
+
+
+@st.cache_data(ttl=600)
+def rendimientos_fierro() -> list[dict]:
+    return conectar().table("v_rendimientos_fierro").select("*") \
+        .order("varillas_por_tonelada", desc=True).execute().data
+
+
+@st.cache_data(ttl=600)
+def marcas_fierro() -> list[dict]:
+    return conectar().table("v_marcas_fierro").select("*").order("nombre").execute().data
+
+
+def guardar_precio_tonelada(id_ferreteria: int, id_sede: int | None,
+                            id_marca: int, precio_usd: float) -> int:
+    """Registra el precio de la tonelada y recalcula los precios en soles.
+
+    No se usa upsert porque la unicidad es por ferretería, sede (que puede
+    ir vacía) y marca: se busca el registro y se actualiza o se crea.
+    """
+    from datetime import datetime, timezone
+    sb = conectar()
+    consulta = sb.table("m_precios_tonelada").select("id_precio_tonelada") \
+        .eq("id_ferreteria", id_ferreteria).eq("id_marca", id_marca)
+    consulta = consulta.is_("id_sede", "null") if id_sede is None else consulta.eq("id_sede", id_sede)
+    existente = consulta.execute().data
+
+    datos = {"precio_usd": precio_usd, "activo": True,
+             "fecha_confirmacion": datetime.now(timezone.utc).isoformat()}
+    if existente:
+        sb.table("m_precios_tonelada").update(datos) \
+            .eq("id_precio_tonelada", existente[0]["id_precio_tonelada"]).execute()
+    else:
+        sb.table("m_precios_tonelada").insert({
+            **datos, "id_ferreteria": id_ferreteria, "id_sede": id_sede,
+            "id_marca": id_marca}).execute()
+
+    return sb.rpc("recalcular_precios_fierro",
+                  {"p_id_ferreteria": id_ferreteria}).execute().data
+
+
+def quitar_precio_tonelada(id_precio_tonelada: int) -> None:
+    conectar().rpc("quitar_precio_tonelada",
+                   {"p_id_precio_tonelada": id_precio_tonelada}).execute()
+
+
+def precios_calculados(ids_sede: list[int]) -> set:
+    """Pares (sede, sku) cuyo precio sale de la tonelada: no se editan a mano."""
+    if not ids_sede:
+        return set()
+    filas, inicio = [], 0
+    while True:
+        pagina = conectar().table("m_precios").select("id_sede, id_sku") \
+            .in_("id_sede", ids_sede).eq("fuente", "tonelada_usd").eq("activo", True) \
+            .range(inicio, inicio + 999).execute().data
+        filas.extend(pagina)
+        if len(pagina) < 1000:
+            break
+        inicio += 1000
+    return {(f["id_sede"], f["id_sku"]) for f in filas}
+
+
+# ===========================================================================
+# FERRETERÍAS Y SEDES
+# Crean el supervisor (solo en sus zonas) y el master. El código de cada
+# sede lo genera la base: prefijo de la zona + siguiente número libre.
+# ===========================================================================
+
+def sedes_mapa() -> list[dict]:
+    """Todas las sedes con su ubicación, zona y cuántos precios tienen."""
+    return conectar().table("v_sedes_mapa").select("*").order("codigo").execute().data
+
+
+def ferreterias_todas() -> list[dict]:
+    return conectar().table("m_ferreterias") \
+        .select("id_ferreteria, nombre, ruc, codigo_asociado, activo") \
+        .order("nombre").execute().data
+
+
+def crear_ferreteria(datos: dict) -> dict:
+    return conectar().table("m_ferreterias").insert(datos).execute().data[0]
+
+
+def actualizar_ferreteria(id_ferreteria: int, datos: dict) -> None:
+    conectar().table("m_ferreterias").update(datos) \
+        .eq("id_ferreteria", id_ferreteria).execute()
+
+
+def crear_sede(datos: dict) -> dict:
+    """Devuelve {id_sede, codigo}. El distrito sale de las coordenadas."""
+    return conectar().rpc("crear_sede", {"p": datos}).execute().data
+
+
+def actualizar_sede(id_sede: int, datos: dict) -> None:
+    """Si cambian las coordenadas, la base recalcula el distrito sola."""
+    conectar().table("m_sedes").update(datos).eq("id_sede", id_sede).execute()
+
+
+def siguiente_codigo_sede(id_zona: int) -> str | None:
+    try:
+        return conectar().rpc("siguiente_codigo_sede", {"p_id_zona": id_zona}).execute().data
+    except Exception:
+        return None
+
+
+def abrir_zona(nombre: str, prefijo: str, id_provincia: int) -> int:
+    return conectar().rpc("abrir_zona", {
+        "p_nombre": nombre, "p_prefijo": prefijo, "p_id_provincia": id_provincia,
+    }).execute().data
+
+
+def _leer_todo(tabla: str, orden: list[str]) -> list[dict]:
+    """Lee una tabla o vista completa, de 1,000 en 1,000 filas.
+
+    El orden es obligatorio: sin él, dos páginas podrían repetir o saltarse
+    filas.
+    """
+    filas, inicio = [], 0
+    while True:
+        consulta = conectar().table(tabla).select("*")
+        for columna in orden:
+            consulta = consulta.order(columna)
+        pagina = consulta.range(inicio, inicio + 999).execute().data
+        filas.extend(pagina)
+        if len(pagina) < 1000:
+            break
+        inicio += 1000
+    return filas
+
+
+def rangos_precios() -> list[dict]:
+    """Rango de precio de cada producto y unidad por ciudad, sin importar la marca."""
+    return _leer_todo("v_rangos_precios", ["zona", "categoria", "producto", "unidad"])
+
+
+def precios_por_ferreteria() -> list[dict]:
+    return _leer_todo("v_precios_por_ferreteria",
+                      ["zona", "categoria", "producto", "unidad", "precio", "ferreteria", "marca"])

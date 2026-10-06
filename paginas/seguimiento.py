@@ -56,11 +56,13 @@ def mostrar(usuario: dict):
 
     _tabla_ferreterias(ferreterias)
 
-    col_resumen, col_formato = st.columns(2)
+    col_resumen, col_formato, col_rangos = st.columns(3)
     with col_resumen:
         _exportar(desde, hasta, resumen, asesores, zonas, perdidas, ferreterias)
     with col_formato:
         _exportar_formato_cotizadores(desde, hasta)
+    with col_rangos:
+        _exportar_rangos_precios()
 
 
 # ==================================================== selector de fechas ===
@@ -337,4 +339,99 @@ def _excel_formato(filas) -> bytes:
         for fila in hoja.iter_rows(min_row=2, min_col=2, max_col=2):
             for celda in fila:
                 celda.number_format = "DD/MM/YYYY"
+    return buffer.getvalue()
+
+
+# ================================================== rangos de precios ===
+COLUMNAS_RANGOS = {
+    "zona": "Ciudad", "categoria": "Categoría", "producto": "Producto",
+    "unidad": "Unidad", "ferreterias": "Ferreterías", "marcas": "Marcas",
+    "precio_minimo": "Precio mínimo", "precio_maximo": "Precio máximo",
+    "precio_promedio": "Promedio", "precio_mediana": "Mediana",
+    "diferencia_pct": "Diferencia %",
+    "ferreteria_mas_barata": "Más barata", "ferreteria_mas_cara": "Más cara",
+    "texto_whatsapp": "Para WhatsApp",
+}
+COLUMNAS_DETALLE = {
+    "zona": "Ciudad", "categoria": "Categoría", "producto": "Producto",
+    "unidad": "Unidad", "ferreteria": "Ferretería", "marca": "Marca",
+    "precio": "Precio", "sedes": "Sedes", "ultima_confirmacion": "Confirmado",
+}
+
+
+def _exportar_rangos_precios():
+    """Rangos de precio por producto y ciudad, sin importar la marca.
+
+    No depende del periodo elegido arriba: son los precios vigentes hoy.
+    """
+    if st.session_state.get("rangos_archivo") is None:
+        if st.button("Preparar rangos de precios", width="stretch",
+                     help="Mínimo, máximo, promedio y mediana de cada producto por ciudad, "
+                          "sin importar la marca. Son los precios vigentes hoy, no dependen "
+                          "del periodo elegido."):
+            with st.spinner("Armando el archivo…"):
+                rangos = db.rangos_precios()
+                detalle = db.precios_por_ferreteria()
+                st.session_state.rangos_archivo = _excel_rangos(rangos, detalle)
+                st.session_state.rangos_filas = len(rangos)
+            st.rerun()
+        return
+
+    st.download_button(
+        f"⬇ Rangos de precios · {st.session_state.rangos_filas:,} productos",
+        data=st.session_state.rangos_archivo,
+        file_name=f"rangos_precios_{config.hoy_lima()}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        width="stretch", on_click=lambda: st.session_state.update(rangos_archivo=None),
+    )
+
+
+def _texto_whatsapp(fila) -> str:
+    """«ALAMBRE #16 por Kilogramo -> S/ 3.80», listo para pegar en WhatsApp.
+
+    Se escribe con dos decimales: el precio guarda hasta cuatro, y un
+    «S/ 19.3319» se ve raro en un mensaje.
+    """
+    precio = fila.get("precio_minimo")
+    if precio is None:
+        return ""
+    return f"{fila['producto']} por {fila['unidad']} -> S/ {float(precio):,.2f}"
+
+
+def _excel_rangos(rangos, detalle) -> bytes:
+    from openpyxl.utils import get_column_letter
+
+    rangos = [{**r, "texto_whatsapp": _texto_whatsapp(r)} for r in rangos]
+
+    hojas = {
+        "Rangos por ciudad": (rangos, COLUMNAS_RANGOS,
+                              {"Precio mínimo", "Precio máximo", "Promedio", "Mediana"}),
+        "Detalle por ferretería": (detalle, COLUMNAS_DETALLE, {"Precio"}),
+    }
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        for nombre, (filas, columnas, de_dinero) in hojas.items():
+            tabla = pd.DataFrame(filas, columns=list(columnas)).rename(columns=columnas)
+            if "Confirmado" in tabla.columns:
+                tabla["Confirmado"] = pd.to_datetime(tabla["Confirmado"], utc=True) \
+                    .dt.tz_convert("America/Lima").dt.strftime("%d/%m/%Y")
+            tabla.to_excel(writer, sheet_name=nombre, index=False)
+
+            hoja = writer.sheets[nombre]
+            hoja.freeze_panes = "A2"
+            hoja.auto_filter.ref = hoja.dimensions
+            for celda in hoja[1]:
+                celda.font = celda.font.copy(bold=True)
+            for i, columna in enumerate(tabla.columns, start=1):
+                letra = get_column_letter(i)
+                hoja.column_dimensions[letra].width = (
+                    55 if columna == "Para WhatsApp"
+                    else 26 if columna in ("Producto", "Unidad", "Ferretería", "Más barata", "Más cara")
+                    else 14)
+                if columna in de_dinero:
+                    for (celda,) in hoja.iter_rows(min_row=2, min_col=i, max_col=i):
+                        celda.number_format = '"S/" #,##0.00'
+                if columna == "Diferencia %":
+                    for (celda,) in hoja.iter_rows(min_row=2, min_col=i, max_col=i):
+                        celda.number_format = '0.0"%"'
     return buffer.getvalue()

@@ -9,19 +9,26 @@ Para ejecutar:  streamlit run app.py
 """
 import streamlit as st
 
-st.set_page_config(page_title="Cotizador SIDEREXPRESS", page_icon="🧱", layout="wide")
+from pathlib import Path                    # noqa: E402
+
+# Ícono de la pestaña del navegador. Se usa assets/icono.png si existe; si no,
+# el logo. Conviene un ícono cuadrado: el logo, que es ancho, se ve aplastado.
+_ASSETS = Path(__file__).parent / "assets"
+_ICONO = _ASSETS / "icono.png" if (_ASSETS / "icono.png").exists() else _ASSETS / "logo.png"
+
+st.set_page_config(page_title="SIDER EXPRESS", page_icon=str(_ICONO), layout="wide")
 
 import config                                # noqa: E402
 import db                                    # noqa: E402
 import sesion                                # noqa: E402
-from paginas import (login, negociaciones, precios,  # noqa: E402
-                     productos, promociones, seguimiento)
+from paginas import (ferreterias, login, negociaciones,  # noqa: E402
+                     precios, productos, promociones, seguimiento)
 
 
 # Qué pantallas ve cada rol.
 # Para agregar una pantalla nueva: créala en paginas/ y agrégala aquí.
 MENU = {
-    "asesor":     ["Negociaciones", "Precios"],
+    "asesor":     ["Negociaciones", "Precios","seguimiento"],
     "supervisor": ["Negociaciones", "Seguimiento", "Precios",
                    "Ferreterías", "Clientes"],
     "master":     ["Negociaciones", "Seguimiento", "Precios", "Productos",
@@ -83,6 +90,8 @@ def main():
         seguimiento.mostrar(usuario)
     elif pantalla == "Productos":
         productos.mostrar(usuario)
+    elif pantalla == "Ferreterías":
+        ferreterias.mostrar(usuario)
     else:
         st.info(f"La pantalla «{pantalla}» todavía no está construida.")
 

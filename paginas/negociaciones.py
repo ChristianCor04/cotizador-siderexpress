@@ -138,19 +138,69 @@ def _bloque_lista(usuario):
         st.caption("No hay negociaciones en este estado.")
         return
 
+    # Una sola consulta para el semáforo de todas las tarjetas visibles
+    semaforos = db.semaforo_de([n["id_negociacion"] for n in negociaciones])
+    _estilos_semaforo(negociaciones, semaforos)
+
     for neg in negociaciones:
-        _tarjeta_negociacion(neg)
+        _tarjeta_negociacion(neg, semaforos.get(neg["id_negociacion"]))
 
 
-def _tarjeta_negociacion(neg):
+# Semáforo de seguimiento. La regla vive en la base (v_negociaciones_semaforo);
+# aquí solo se decide cómo se ve.
+SEMAFORO = {
+    "verde":               {"color": "#2E9E5B", "fondo": None},
+    "neutro":              {"color": None,      "fondo": None},
+    "amarillo":            {"color": "#E0A100", "fondo": None},
+    "rojo":                {"color": "#D0021B", "fondo": None},
+    "venta_por_confirmar": {"color": "#3B82F6", "fondo": "rgba(59, 130, 246, 0.16)"},
+}
+
+
+def _texto_semaforo(estado: dict) -> str:
+    dias = estado.get("dias_sin_cotizar") or 0
+    return {
+        "verde": ":green[● Cotizó hoy]",
+        "neutro": f"● {dias} día{'s' if dias != 1 else ''} sin cotizar",
+        "amarillo": f":orange[● {dias} días sin cotizar]",
+        "rojo": f":red[● {dias} días sin cotizar]",
+        "venta_por_confirmar": ":blue[● Venta por confirmar]",
+    }.get(estado.get("semaforo"), "")
+
+
+def _estilos_semaforo(negociaciones, semaforos):
+    """Pinta cada tarjeta según su estado.
+
+    Streamlit no permite colorear un contenedor directamente: se le da una
+    key a cada tarjeta y se apunta a ella con CSS.
+    """
+    reglas = []
+    for neg in negociaciones:
+        estado = semaforos.get(neg["id_negociacion"]) or {}
+        estilo = SEMAFORO.get(estado.get("semaforo"))
+        if not estilo or not estilo["color"]:
+            continue
+        selector = f".st-key-neg_{neg['id_negociacion']}"
+        regla = f"border-left: 6px solid {estilo['color']} !important;"
+        if estilo["fondo"]:
+            regla += f" background: {estilo['fondo']} !important;"
+        reglas.append(f"{selector} {{ {regla} }}")
+    if reglas:
+        st.html(f"<style>{' '.join(reglas)}</style>")
+
+
+def _tarjeta_negociacion(neg, estado=None):
     """Una tarjeta de la lista."""
     cliente = neg.get("m_clientes") or {}
     tipo = (cliente.get("m_tipos_cliente") or {})
     activa = (st.session_state.negociacion or {}).get("id_negociacion") == neg["id_negociacion"]
 
-    with st.container(border=True):
+    with st.container(border=True, key=f"neg_{neg['id_negociacion']}"):
         st.caption(config.codigo_negociacion(neg["id_negociacion"]))
         st.markdown(f"**{cliente.get('nombre') or 'Sin nombre'}**")
+        texto = _texto_semaforo(estado or {})
+        if texto:
+            st.caption(texto)
         etiqueta = f"{tipo.get('segmento','')} · {tipo.get('nombre','')}".strip(" ·")
         distrito = (neg.get("m_distritos") or {}).get("nombre") or neg.get("distrito_texto") or ""
         st.caption(f"{etiqueta} · {distrito}" if etiqueta else distrito)
@@ -1417,6 +1467,7 @@ def _guardar_y_generar_pdf(usuario, elegida, promociones, descuento, total, devo
 
     datos = {
         "logo": config.LOGO,
+        "logo_blanco": config.LOGO_BLANCO,
         "cotizacion": {
             "codigo": config.codigo_cotizacion(id_cotizacion),
             "fecha": config.fecha_hora((guardada or {}).get("fecha")),

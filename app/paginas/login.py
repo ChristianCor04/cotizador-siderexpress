@@ -18,7 +18,7 @@ def mostrar():
             izq_logo, centro_logo, der_logo = st.columns([1, 3, 1])
             centro_logo.image(config.LOGO, width="stretch")
             st.markdown(
-                "<p style='text-align:center;margin-top:-6px'>Cotizador comercial</p>",
+                "<p style='text-align:center;margin-top:-6px'>Plataforma comercial</p>",
                 unsafe_allow_html=True,
             )
 
