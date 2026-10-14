@@ -16,7 +16,7 @@ import streamlit as st
 import config
 import db
 from logica.cotizacion import (cotizar_en_sedes, elegir_regla, monto_referencial,
-                               sedes_candidatas)
+                               sedes_candidatas, seleccionar_por_cobertura)
 from logica.geo import extraer_coordenadas, sedes_cercanas
 from logica.pdf import generar_pdf
 
@@ -35,6 +35,8 @@ VALORES_INICIALES = {
     "resultados": [],         # ferreterías cotizadas
     "sede_elegida": None,
     "regla": None,
+    # Cómo se eligieron las ferreterías cuando la zona usa cobertura
+    "asignacion": None,
     "monto_ref": 0.0,
     "modo_nuevo": False,      # True mientras crea una negociación nueva
     "cotizacion_actual": None,  # última cotización cargada de la negociación
@@ -1043,6 +1045,12 @@ def _recotizar():
 
     monto = monto_referencial(lineas, db.precios_referenciales())
 
+    # Si la zona de la obra ya trabaja por cobertura, se usa la lógica nueva.
+    # Las zonas que siguen con radio pasan al bloque de abajo, sin cambios.
+    if _cotizar_por_cobertura(lineas, coords, id_distrito, monto):
+        return
+
+    st.session_state.asignacion = None
     # Las reglas pueden variar por zona: se piden las de la zona de la obra.
     # Con coordenadas, mientras no tengamos los límites distritales, se usa
     # la zona de la sede más cercana como aproximación.
@@ -1079,6 +1087,47 @@ def _recotizar():
     st.session_state.sede_elegida = None
 
 
+def _distrito_de_la_obra(coords, id_distrito) -> int | None:
+    """Con coordenadas, el distrito donde caen; si no, el elegido a mano."""
+    if coords:
+        geo = db.distrito_de_coordenadas(coords[0], coords[1])
+        if geo:
+            return geo["id_distrito"]
+    return id_distrito
+
+
+def _cotizar_por_cobertura(lineas, coords, id_distrito, monto) -> bool:
+    """Cotiza con la cobertura de la zona. Devuelve False si la zona sigue con radio.
+
+    La regla y el escalamiento por niveles viven en la base y en
+    logica/cotizacion.py: el agente de WhatsApp usa exactamente lo mismo.
+    """
+    distrito_obra = _distrito_de_la_obra(coords, id_distrito)
+    if distrito_obra is None:
+        return False
+
+    paquete = db.candidatos_cobertura(distrito_obra, monto)
+    if (paquete or {}).get("metodo") != "cobertura":
+        return False
+
+    ids_sede = [s["id_sede"] for s in paquete.get("sedes") or []]
+    todos_skus = [s for l in lineas for s in l["skus_posibles"]]
+    precios = db.precios_de(todos_skus, ids_sede) if ids_sede else []
+
+    resultados, info = seleccionar_por_cobertura(lineas, paquete, precios, coords)
+    if not resultados:
+        st.warning(info["mensaje"] + " Revisa la ubicación de la obra o la cobertura "
+                   "cargada en Ferreterías.")
+        return True
+
+    st.session_state.resultados = resultados
+    st.session_state.regla = {}
+    st.session_state.asignacion = info
+    st.session_state.monto_ref = monto
+    st.session_state.sede_elegida = None
+    return True
+
+
 # ---------------------------------------------------------------- columna 3
 def _bloque_ferreterias(usuario):
     st.markdown("##### Ferreterías")
@@ -1090,11 +1139,24 @@ def _bloque_ferreterias(usuario):
         st.info("Arma la lista de materiales y presiona «Buscar ferreterías».")
         return
 
-    regla = st.session_state.regla
-    alcance = (f"radio {regla['radio_km']} km" if regla["alcance"] == "radio"
-               else f"por {regla['alcance']}")
-    st.caption(f"Regla {regla['codigo']} · {alcance} · "
-               f"canasta referencial {config.soles(st.session_state.monto_ref)}")
+    asignacion = st.session_state.asignacion
+    if asignacion:
+        # Se dice siempre con qué alcance se cotizó: si se amplió, el asesor
+        # debe saber que puede estar ofreciendo una ferretería más lejana.
+        texto = (f"{asignacion['mensaje']} · canasta referencial "
+                 f"{config.soles(st.session_state.monto_ref)}")
+        if asignacion["ampliada"]:
+            st.warning(texto)
+        else:
+            st.caption(texto)
+        if not asignacion["completa"]:
+            st.caption(":orange[Ninguna ferretería de la zona tiene la canasta completa.]")
+    else:
+        regla = st.session_state.regla
+        alcance = (f"radio {regla['radio_km']} km" if regla["alcance"] == "radio"
+                   else f"por {regla['alcance']}")
+        st.caption(f"Regla {regla['codigo']} · {alcance} · "
+                   f"canasta referencial {config.soles(st.session_state.monto_ref)}")
 
     maximo = max(r["n_faltantes"] for r in resultados)
     limite = 0
@@ -1155,6 +1217,8 @@ def _tarjeta_ferreteria(r):
             st.caption(":orange[↺ Ferretería de la última cotización]")
 
         detalles = []
+        if r.get("cobertura"):
+            detalles.append(r["cobertura"])
         if r["distancia_km"] is not None:
             detalles.append(f"{r['distancia_km']} km")
         if r["canasta_completa"]:
@@ -1431,7 +1495,7 @@ def _guardar_y_generar_pdf(usuario, elegida, promociones, descuento, total, devo
     cabecera = {
         "id_negociacion": negociacion["id_negociacion"],
         "id_sede": elegida["id_sede"],
-        "id_regla": st.session_state.regla.get("id_regla"),
+        "id_regla": (st.session_state.regla or {}).get("id_regla"),
         "monto_referencial": st.session_state.monto_ref,
         "distancia_km": elegida["distancia_km"],
         "latitud": coords[0] if coords else None,
@@ -1440,6 +1504,16 @@ def _guardar_y_generar_pdf(usuario, elegida, promociones, descuento, total, devo
         "ticket": ticket,
         "monto_flete": st.session_state.flete_monto or 0,
     }
+    asignacion = st.session_state.asignacion
+    if asignacion:
+        cabecera.update({
+            "id_regla_asignacion": asignacion["id_regla_asignacion"],
+            "alcance_asignacion": asignacion["alcance"],
+            "nivel_asignacion": asignacion["nivel"],
+            "ampliada": asignacion["ampliada"],
+        })
+    else:
+        cabecera["alcance_asignacion"] = (st.session_state.regla or {}).get("alcance")
 
     try:
         id_cotizacion = db.guardar_cotizacion(cabecera, lineas, promos_json, ferreterias)

@@ -979,3 +979,50 @@ def rangos_precios() -> list[dict]:
 def precios_por_ferreteria() -> list[dict]:
     return _leer_todo("v_precios_por_ferreteria",
                       ["zona", "categoria", "producto", "unidad", "precio", "ferreteria", "marca"])
+
+
+# ===========================================================================
+# ASIGNACIÓN POR COBERTURA
+# ===========================================================================
+
+def candidatos_cobertura(id_distrito: int, monto: float) -> dict:
+    """Zona, método, regla y sedes candidatas para la obra y el monto."""
+    return conectar().rpc("candidatos_cobertura", {
+        "p_id_distrito": id_distrito, "p_monto": round(float(monto), 2),
+    }).execute().data
+
+
+def cobertura_de_sede(id_sede: int) -> list[dict]:
+    return conectar().table("v_cobertura_sedes").select("*") \
+        .eq("id_sede", id_sede).eq("activo", True) \
+        .order("nivel").order("distrito").execute().data
+
+
+def cubrir_distritos(id_sede: int, nivel: int, ids_distrito: list[int]) -> int:
+    return conectar().rpc("cubrir_distritos", {
+        "p_id_sede": id_sede, "p_nivel": nivel, "p_distritos": ids_distrito,
+    }).execute().data
+
+
+def quitar_cobertura(id_sede: int, ids_distrito: list[int]) -> int:
+    return conectar().rpc("quitar_cobertura", {
+        "p_id_sede": id_sede, "p_distritos": ids_distrito,
+    }).execute().data
+
+
+def cobertura_distritos(zona: str | None = None) -> list[dict]:
+    """Cuántas sedes cubren cada distrito atendido, por nivel."""
+    consulta = conectar().table("v_cobertura_distritos").select("*")
+    if zona:
+        consulta = consulta.eq("zona", zona)
+    return consulta.order("zona").order("distrito").execute().data
+
+
+def zonas_con_metodo() -> list[dict]:
+    return conectar().table("m_zonas").select("id_zona, nombre, metodo_asignacion") \
+        .order("nombre").execute().data
+
+
+def cambiar_metodo_zona(id_zona: int, metodo: str) -> None:
+    conectar().table("m_zonas").update({"metodo_asignacion": metodo}) \
+        .eq("id_zona", id_zona).execute()

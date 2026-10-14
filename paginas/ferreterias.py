@@ -50,6 +50,7 @@ def mostrar(usuario: dict):
     ferreterias = db.ferreterias_todas()
 
     _indicadores(ferreterias, sedes)
+    _panel_cobertura_zonas(usuario)
 
     col_lista, col_mapa = st.columns([1, 2.4], gap="medium")
     with col_lista:
@@ -539,6 +540,124 @@ def _form_editar_sede(sede, usuario):
                 st.error(_error(e))
         if error:
             st.caption(f":orange[{error}]")
+
+    _cobertura_de_sede(sede, solo_lectura)
+
+
+# ============================================================ cobertura ===
+NIVELES = {1: "Principal", 2: "Secundaria", 3: "Terciaria"}
+
+
+def _cobertura_de_sede(sede, solo_lectura):
+    """Qué distritos atiende la sede y con qué prioridad.
+
+    Es lo que usa la cotización en las zonas que trabajan por cobertura: con
+    montos bajos compiten las sedes que cubren el distrito de la obra,
+    empezando por las principales.
+    """
+    v = f"{st.session_state.fer_version}_{sede['id_sede']}"
+    actual = db.cobertura_de_sede(sede["id_sede"])
+
+    with st.container(border=True):
+        st.markdown(f"**Cobertura de {sede['codigo']}** · {len(actual)} distrito(s)")
+        if actual:
+            st.dataframe(pd.DataFrame([{
+                "Distrito": (c["distrito"] or "").replace("_", " ").title(),
+                "Provincia": (c["provincia"] or "").title(),
+                "Zona": c["zona"] or "Sin zona",
+                "Nivel": NIVELES.get(c["nivel"], c["nivel"]),
+            } for c in actual]), hide_index=True, width="stretch")
+        else:
+            st.caption("Esta sede todavía no cubre ningún distrito.")
+
+        if solo_lectura:
+            return
+
+        distritos = db.catalogo_distritos()
+        nombre_distrito = {d["id_distrito"]: _nombre_distrito(d) for d in distritos}
+
+        st.caption("Agregar o cambiar el nivel. Un distrito que ya cubre toma el nivel nuevo.")
+        col_d, col_n, col_b = st.columns([3, 1.2, 1], vertical_alignment="bottom")
+        elegidos = col_d.multiselect(
+            "Distritos", [d["id_distrito"] for d in distritos],
+            format_func=lambda i: nombre_distrito.get(i, str(i)), key=f"cob_add_{v}",
+            placeholder="Elige uno o varios distritos")
+        nivel = col_n.selectbox("Nivel", [1, 2, 3], format_func=NIVELES.get, key=f"cob_nivel_{v}")
+        if col_b.button("Agregar", width="stretch", disabled=not elegidos, key=f"cob_btn_{v}"):
+            _guardar_cobertura(lambda: db.cubrir_distritos(sede["id_sede"], nivel, elegidos),
+                               f"{len(elegidos)} distrito(s) con cobertura {NIVELES[nivel].lower()}.")
+
+        if actual:
+            col_q, col_bq = st.columns([4.2, 1], vertical_alignment="bottom")
+            quitar = col_q.multiselect(
+                "Quitar", [c["id_distrito"] for c in actual],
+                format_func=lambda i: nombre_distrito.get(i, str(i)), key=f"cob_del_{v}",
+                placeholder="Distritos que ya no atiende")
+            if col_bq.button("Quitar", width="stretch", disabled=not quitar, key=f"cob_btnq_{v}"):
+                _guardar_cobertura(lambda: db.quitar_cobertura(sede["id_sede"], quitar),
+                                   f"{len(quitar)} distrito(s) quitados de la cobertura.")
+
+
+def _nombre_distrito(d) -> str:
+    return (f"{(d.get('distrito') or d.get('nombre') or '').replace('_', ' ').title()} · "
+            f"{(d.get('provincia') or '').replace('_', ' ').title()}")
+
+
+def _guardar_cobertura(accion, mensaje):
+    try:
+        accion()
+        db.limpiar_cache()
+        st.session_state.fer_mensaje = mensaje
+        st.rerun()
+    except Exception as e:
+        st.error(_error(e))
+
+
+def _cambiar_metodo(id_zona, nombre):
+    metodo = st.session_state.get(f"metodo_{id_zona}")
+    if not metodo:
+        return
+    try:
+        db.cambiar_metodo_zona(id_zona, metodo)
+        db.limpiar_cache()
+        st.session_state.fer_mensaje = f"{nombre} ahora cotiza por {metodo}."
+    except Exception as e:
+        st.session_state.fer_mensaje = None
+        st.error(_error(e))
+
+
+def _panel_cobertura_zonas(usuario):
+    """Método de cada zona y distritos sin cobertura principal.
+
+    Cada zona pasa de radio a cobertura cuando su cobertura está cargada;
+    hasta entonces sigue cotizando como antes. Cambiar el método es del master.
+    """
+    zonas = db.zonas_con_metodo()
+    if not zonas:
+        return
+    with st.expander("Cobertura por zona"):
+        for z in zonas:
+            distritos = db.cobertura_distritos(z["nombre"])
+            sin_principal = [d for d in distritos if d["sin_principal"]]
+            col_t, col_m = st.columns([3, 1.4], vertical_alignment="center")
+            col_t.markdown(
+                f"**{z['nombre']}** · {len(distritos)} distritos atendidos · "
+                + (f":orange[{len(sin_principal)} sin ferretería principal]" if sin_principal
+                   else "todos con ferretería principal"))
+            if usuario["rol"] == "master":
+                # Se guarda solo cuando el master toca el selector. Comparar en
+                # cada recarga podía entrar en un ciclo si el cambio no llegaba
+                # a guardarse.
+                col_m.segmented_control(
+                    "Método", ["radio", "cobertura"], default=z["metodo_asignacion"],
+                    key=f"metodo_{z['id_zona']}", label_visibility="collapsed",
+                    on_change=_cambiar_metodo, args=(z["id_zona"], z["nombre"]))
+            else:
+                col_m.caption(f"Cotiza por {z['metodo_asignacion']}")
+            if sin_principal:
+                st.caption("Sin principal: " + ", ".join(
+                    (d["distrito"] or "").replace("_", " ").title() for d in sin_principal[:15])
+                    + (" …" if len(sin_principal) > 15 else ""))
 
 
 # =============================================================== errores ===

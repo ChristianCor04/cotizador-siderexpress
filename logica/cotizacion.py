@@ -11,7 +11,7 @@ Si quieres cambiar CÓMO se cotiza, este es el archivo.
 Si quieres cambiar los MONTOS o RADIOS, eso está en Supabase,
 en la tabla m_reglas_cotizacion.
 """
-from logica.geo import sedes_cercanas
+from logica.geo import distancia_km, sedes_cercanas
 
 
 def monto_referencial(lineas: list[dict], precios_ref: dict[int, float]) -> float:
@@ -177,3 +177,121 @@ def cotizar_en_sedes(lineas: list[dict], sedes: list[dict],
         return unicos
 
     return resultados
+
+
+# ===========================================================================
+# ASIGNACIÓN POR COBERTURA
+# La base entrega la regla y las sedes candidatas (candidatos_cobertura). Aquí
+# se decide con qué nivel se cotiza: se empieza por el nivel de la regla y se
+# suma el siguiente mientras NINGUNA sede tenga la canasta completa. Si ni con
+# la terciaria se completa, se amplía a toda la zona.
+#
+# Esta función es la única que decide la asignación por cobertura: la usan la
+# pantalla y el agente, para que nunca calculen distinto.
+# ===========================================================================
+
+NIVELES = {1: "principal", 2: "secundaria", 3: "terciaria"}
+
+
+def etapas_de_busqueda(regla: dict) -> list[tuple[str, int | None]]:
+    """Las etapas en orden: («distrito», nivel) … y al final («zona», None)."""
+    if regla["alcance"] == "zona":
+        return [("zona", None)]
+    inicio = int(regla.get("nivel_inicial") or 1)
+    return [("distrito", n) for n in range(inicio, 4)] + [("zona", None)]
+
+
+def seleccionar_por_cobertura(lineas: list[dict], paquete: dict,
+                              precios: list[dict],
+                              coordenadas: tuple | None = None) -> tuple[list[dict], dict]:
+    """Cotiza por cobertura, escalando por niveles según la canasta completa.
+
+    paquete:  lo que devuelve candidatos_cobertura (zona, regla, sedes)
+    precios:  los de todas las sedes candidatas
+    coordenadas: las del cliente, solo para mostrar la distancia
+
+    Devuelve (resultados, info). Los resultados traen TODAS las sedes de la
+    etapa final, incluidas dos sedes de una misma ferretería, agrupadas.
+    """
+    regla = paquete.get("regla")
+    if not paquete.get("id_zona") or not regla:
+        return [], {"motivo": "sin_zona",
+                    "mensaje": "La obra no está en ninguna zona que atendamos."}
+
+    sedes = []
+    for s in paquete.get("sedes") or []:
+        sede = dict(s)
+        if coordenadas and s.get("latitud") is not None and s.get("longitud") is not None:
+            sede["distancia_km"] = round(distancia_km(coordenadas[0], coordenadas[1],
+                                                      s["latitud"], s["longitud"]), 2)
+        else:
+            sede["distancia_km"] = None
+        sedes.append(sede)
+
+    etapas = etapas_de_busqueda(regla)
+    resultados, usada = [], None
+
+    for i, (alcance, nivel) in enumerate(etapas):
+        if alcance == "zona":
+            grupo = sedes
+        else:
+            grupo = [s for s in sedes if s.get("nivel_en_distrito")
+                     and s["nivel_en_distrito"] <= nivel]
+        if not grupo:
+            continue
+
+        resultados = cotizar_en_sedes(lineas, grupo, precios, una_por_ferreteria=False)
+        usada = (i, alcance, nivel)
+        if any(r["canasta_completa"] for r in resultados):
+            break
+
+    if usada is None:
+        return [], {"motivo": "sin_ferreterias", "id_regla_asignacion": regla["id_regla_asignacion"],
+                    "mensaje": f"Ninguna ferretería cubre la zona {paquete.get('zona')}."}
+
+    i, alcance, nivel = usada
+    por_sede = {s["id_sede"]: s for s in sedes}
+    for r in resultados:
+        nivel_r = por_sede.get(r["id_sede"], {}).get("nivel_en_distrito")
+        r["nivel_en_distrito"] = nivel_r
+        r["cobertura"] = (f"Cobertura {NIVELES[nivel_r]}" if nivel_r
+                          else "Cubre otra parte de la zona")
+
+    info = {
+        "id_regla_asignacion": regla["id_regla_asignacion"],
+        "regla": regla.get("descripcion"),
+        "alcance": alcance,
+        "nivel": nivel,
+        "ampliada": i > 0,
+        "completa": any(r["canasta_completa"] for r in resultados),
+        "mensaje": _mensaje_etapa(alcance, nivel, i > 0, paquete.get("zona")),
+    }
+    return _agrupar_por_ferreteria(resultados), info
+
+
+def _mensaje_etapa(alcance, nivel, ampliada, zona) -> str:
+    if alcance == "zona":
+        base = f"toda la zona {zona}"
+    elif nivel == 1:
+        base = "cobertura principal del distrito"
+    else:
+        base = f"cobertura hasta {NIVELES[nivel]} del distrito"
+    return (f"Se amplió a {base}: ninguna ferretería del alcance inicial tenía la "
+            "canasta completa." if ampliada else f"Se cotizó con {base}.")
+
+
+def _agrupar_por_ferreteria(resultados: list[dict]) -> list[dict]:
+    """Ordena por la mejor sede de cada ferretería y deja juntas sus sedes.
+
+    Así dos sedes de una misma ferretería se leen como dos opciones de ella y
+    no como dos competidores separados en la lista.
+    """
+    def clave(r):
+        return (r["n_faltantes"], r["monto"],
+                r["distancia_km"] if r["distancia_km"] is not None else 9e9)
+
+    mejor = {}
+    for r in resultados:
+        if r["ferreteria"] not in mejor or clave(r) < mejor[r["ferreteria"]]:
+            mejor[r["ferreteria"]] = clave(r)
+    return sorted(resultados, key=lambda r: (mejor[r["ferreteria"]], r["ferreteria"], clave(r)))

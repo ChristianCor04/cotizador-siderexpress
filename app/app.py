@@ -28,7 +28,7 @@ from paginas import (ferreterias, login, negociaciones,  # noqa: E402
 # Qué pantallas ve cada rol.
 # Para agregar una pantalla nueva: créala en paginas/ y agrégala aquí.
 MENU = {
-    "asesor":     ["Negociaciones", "Precios","seguimiento"],
+    "asesor":     ["Negociaciones", "Precios"],
     "supervisor": ["Negociaciones", "Seguimiento", "Precios",
                    "Ferreterías", "Clientes"],
     "master":     ["Negociaciones", "Seguimiento", "Precios", "Productos",

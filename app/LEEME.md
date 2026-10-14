@@ -436,3 +436,37 @@ su prefijo; la zona toma todos los distritos libres de esa provincia.
 
 **El mapa** usa el mapa base gratuito de Carto, sin cuenta de Google. Al
 hacer clic en un punto se selecciona su ferretería.
+
+
+## Asignación por cobertura
+
+Reemplaza la búsqueda por radio, **zona por zona**: cada zona tiene un método
+(`m_zonas.metodo_asignacion`), `radio` o `cobertura`. Mientras una zona siga en
+radio, cotiza como antes. El master lo cambia en Ferreterías → Cobertura por zona.
+
+**Cobertura:** `rel_sedes_cobertura` dice qué distritos atiende cada sede y con
+qué nivel: 1 principal, 2 secundaria, 3 terciaria. Cada sede cubre su propio
+distrito como principal desde que se crea. El resto se carga en Ferreterías, al
+editar una sede.
+
+**Reglas por ciudad:** `m_reglas_asignacion`, con rangos de monto (`numrange`).
+Sin `id_zona` es la regla general.
+
+| Ciudad | Tramo | Alcance | Arranca con |
+|---|---|---|---|
+| General (Trujillo, Arequipa, Chiclayo) | menos de S/ 5,000 | distrito | principal |
+| | S/ 5,000 a 8,000 | distrito | principal y secundaria |
+| | más de S/ 8,000 | zona | los tres niveles |
+| Lima | hasta S/ 15,000 | distrito | principal |
+| | más de S/ 15,000 | zona | los tres niveles |
+
+**Escalamiento:** si ninguna ferretería tiene la canasta completa, se suma el
+siguiente nivel; si ni con terciaria se completa, toda la zona. La pantalla avisa
+cuando se amplió. Vive en `seleccionar_por_cobertura` de `logica/cotizacion.py`,
+la misma función que debe usar el agente.
+
+Las coordenadas solo ubican el distrito de la obra y muestran la distancia; ya no
+filtran. Cada cotización guarda el alcance, el nivel y si se amplió.
+
+**Antes de pasar una ciudad a cobertura:** cargar su cobertura y revisar en
+Ferreterías los distritos «sin ferretería principal».
