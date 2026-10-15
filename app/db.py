@@ -98,6 +98,15 @@ def reanudar_sesion(refresh_token: str) -> dict | None:
     return perfil[0] if perfil else None
 
 
+def renovar_sesion() -> bool:
+    """Pide un token nuevo con la sesión actual. Devuelve False si no se pudo."""
+    try:
+        conectar().auth.refresh_session()
+        return True
+    except Exception:
+        return False
+
+
 def cerrar_sesion():
     try:
         conectar().auth.sign_out()
@@ -140,7 +149,10 @@ def catalogo_sedes() -> list[dict]:
     """Sedes activas con su ubicación. Se usa para calcular distancias."""
     filas = conectar().table("m_sedes").select(
         "id_sede, codigo, nombre, latitud, longitud, id_distrito, "
-        "m_ferreterias(nombre), m_distritos(nombre, id_zona, id_provincia)"
+        "m_ferreterias(nombre), "
+        # Con la tabla de cobertura hay dos caminos entre sedes y distritos:
+        # se indica el directo, el distrito donde está la sede.
+        "m_distritos!fk_sede_distrito(nombre, id_zona, id_provincia)"
     ).eq("activo", True).execute().data
 
     return [{
@@ -267,7 +279,7 @@ def precios_de(ids_sku: list[int], ids_sede: list[int]) -> list[dict]:
     filas, desde, tamano = [], 0, 1000
     while True:
         pagina = conectar().table("m_precios") \
-            .select("id_precio, id_sede, id_sku, precio") \
+            .select("id_precio, id_sede, id_sku, precio, fecha_confirmacion") \
             .in_("id_sku", ids_sku).in_("id_sede", ids_sede) \
             .eq("activo", True).range(desde, desde + tamano - 1).execute().data
         filas.extend(pagina)
@@ -566,7 +578,7 @@ def guardar_precios(precios: list[dict], modo: str = "actualizar") -> dict:
 
 def sedes_de_ferreteria(id_ferreteria: int) -> list[dict]:
     return conectar().table("m_sedes") \
-        .select("id_sede, codigo, nombre, m_distritos(nombre)") \
+        .select("id_sede, codigo, nombre, m_distritos!fk_sede_distrito(nombre)") \
         .eq("id_ferreteria", id_ferreteria).eq("activo", True) \
         .order("codigo").execute().data
 

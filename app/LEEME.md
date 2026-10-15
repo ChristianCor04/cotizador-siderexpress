@@ -470,3 +470,20 @@ filtran. Cada cotización guarda el alcance, el nivel y si se amplió.
 
 **Antes de pasar una ciudad a cobertura:** cargar su cobertura y revisar en
 Ferreterías los distritos «sin ferretería principal».
+
+
+## Relaciones ambiguas entre tablas (PGRST201)
+
+Cuando dos tablas quedan unidas por más de un camino, Supabase no sabe cuál
+usar al traer una dentro de la otra y la consulta falla. Pasa al crear una tabla
+que une dos existentes, como `rel_sedes_cobertura` entre sedes y distritos.
+
+Se resuelve nombrando la llave en la consulta. Casos actuales:
+
+- `m_sedes!fk_cot_sede(...)` desde cotizaciones
+- `m_zonas!fk_usuario_zona(...)` desde usuarios
+- `m_usuarios!fk_neg_usuario(...)` desde negociaciones
+- `m_distritos!fk_sede_distrito(...)` desde sedes
+
+**Al crear una tabla nueva que una dos tablas existentes, buscar en `db.py` las
+consultas que traen una dentro de la otra y nombrar la llave.**

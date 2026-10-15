@@ -1087,6 +1087,20 @@ def _recotizar():
     st.session_state.sede_elegida = None
 
 
+# Antigüedad de los precios en la tarjeta de cada ferretería. Mismos cortes
+# que el semáforo de la pantalla Precios: hasta una semana es aceptable.
+def _texto_antiguedad(dias) -> str:
+    if dias is None:
+        return ""
+    if dias == 0:
+        return ":green[● Precios confirmados hoy]"
+    if dias == 1:
+        return ":green[● Precios confirmados ayer]"
+    if dias <= 7:
+        return f":orange[● Precios confirmados hace {dias} días]"
+    return f":red[● Precios confirmados hace {dias} días: conviene validarlos con la ferretería]"
+
+
 def _distrito_de_la_obra(coords, id_distrito) -> int | None:
     """Con coordenadas, el distrito donde caen; si no, el elegido a mano."""
     if coords:
@@ -1226,6 +1240,9 @@ def _tarjeta_ferreteria(r):
         else:
             detalles.append(f"falta: {', '.join(r['faltantes'])}")
         st.caption(" · ".join(detalles))
+        antiguedad = _texto_antiguedad(r.get("dias_precio"))
+        if antiguedad:
+            st.caption(antiguedad)
 
         with st.expander("Ver detalle"):
             por_sku = {c["id_sku"]: c for c in db.catalogo_skus()}
@@ -1479,6 +1496,8 @@ def _guardar_y_generar_pdf(usuario, elegida, promociones, descuento, total, devo
         "monto_canasta": r["monto"] if r["canasta_completa"] else None,
         "ranking": i + 1 if r["canasta_completa"] else None,
         "elegida": r["id_sede"] == elegida["id_sede"],
+        # Se guarda para medir cuántas cotizaciones salen con precios viejos
+        "dias_precio": r.get("dias_precio"),
     } for i, r in enumerate(st.session_state.resultados)]
 
     # Se guardan las aplicadas y las omitidas: la comparación entre lo que se

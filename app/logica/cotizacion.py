@@ -116,6 +116,7 @@ def cotizar_en_sedes(lineas: list[dict], sedes: list[dict],
     for sede in sedes:
         disponibles = por_sede.get(sede["id_sede"], {})
         detalle, faltantes, total = [], [], 0.0
+        confirmaciones = []
 
         for linea in lineas:
             opciones = [
@@ -128,6 +129,8 @@ def cotizar_en_sedes(lineas: list[dict], sedes: list[dict],
                 continue
 
             elegido = min(opciones, key=lambda p: p["precio"])
+            if elegido.get("fecha_confirmacion"):
+                confirmaciones.append(elegido["fecha_confirmacion"])
             precio = linea.get("precio_manual") or elegido["precio"]
             subtotal = round(precio * linea["cantidad"], 2)
             total += subtotal
@@ -158,6 +161,9 @@ def cotizar_en_sedes(lineas: list[dict], sedes: list[dict],
             "canasta_completa": len(faltantes) == 0,
             "monto": round(total, 2),
             "detalle": detalle,
+            # Antigüedad del precio MÁS VIEJO de los que se usaron: basta uno
+            # desactualizado para que la cotización sea poco confiable.
+            "dias_precio": max((_dias_desde(f) for f in confirmaciones), default=None),
         })
 
     # Primero las más completas; dentro de cada grupo, la más barata; y si
@@ -177,6 +183,18 @@ def cotizar_en_sedes(lineas: list[dict], sedes: list[dict],
         return unicos
 
     return resultados
+
+
+def _dias_desde(fecha_iso: str) -> int | None:
+    """Días calendario, en hora de Lima, desde una fecha hasta hoy."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    try:
+        lima = ZoneInfo("America/Lima")
+        fecha = datetime.fromisoformat(str(fecha_iso).replace("Z", "+00:00")).astimezone(lima)
+        return max((datetime.now(lima).date() - fecha.date()).days, 0)
+    except (ValueError, TypeError):
+        return None
 
 
 # ===========================================================================

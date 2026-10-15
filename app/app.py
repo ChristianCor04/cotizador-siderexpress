@@ -7,6 +7,8 @@ Este es el archivo que se ejecuta. Solo hace dos cosas:
 
 Para ejecutar:  streamlit run app.py
 """
+import time
+
 import streamlit as st
 
 from pathlib import Path                    # noqa: E402
@@ -80,20 +82,61 @@ def main():
             st.rerun()
 
     # --- Pantalla elegida
-    if pantalla == "Negociaciones":
-        negociaciones.mostrar(usuario)
-    elif pantalla == "Precios":
-        precios.mostrar(usuario)
-    elif pantalla == "Promociones":
-        promociones.mostrar(usuario)
-    elif pantalla == "Seguimiento":
-        seguimiento.mostrar(usuario)
-    elif pantalla == "Productos":
-        productos.mostrar(usuario)
-    elif pantalla == "Ferreterías":
-        ferreterias.mostrar(usuario)
+    pantallas = {
+        "Negociaciones": negociaciones.mostrar,
+        "Precios": precios.mostrar,
+        "Promociones": promociones.mostrar,
+        "Seguimiento": seguimiento.mostrar,
+        "Productos": productos.mostrar,
+        "Ferreterías": ferreterias.mostrar,
+    }
+    if pantalla in pantallas:
+        _mostrar_con_sesion_valida(pantallas[pantalla], usuario)
     else:
         st.info(f"La pantalla «{pantalla}» todavía no está construida.")
+
+
+# ---------------------------------------------------------------------------
+# ERRORES DE SESIÓN
+# Supabase puede rechazar el permiso de acceso (el token) por dos motivos que
+# no son errores de la app:
+#   PGRST303 «JWT issued at future»: el token recién emitido llega unos
+#            segundos antes de lo que marca el reloj del servidor que responde.
+#            Se resuelve esperando un momento.
+#   PGRST301 «JWT expired»: el token venció. Se renueva la sesión.
+# En ambos casos se reintenta la pantalla sola, hasta dos veces. Si sigue
+# fallando, se pide volver a ingresar en vez de mostrar el error técnico.
+# ---------------------------------------------------------------------------
+ERRORES_DE_SESION = {"PGRST303", "PGRST301"}
+REINTENTOS = 2
+
+
+def _mostrar_con_sesion_valida(mostrar, usuario):
+    from postgrest.exceptions import APIError
+
+    try:
+        mostrar(usuario)
+        st.session_state.pop("reintentos_sesion", None)
+    except APIError as e:
+        codigo = getattr(e, "code", None)
+        if codigo not in ERRORES_DE_SESION:
+            raise
+
+        intento = st.session_state.get("reintentos_sesion", 0) + 1
+        if intento <= REINTENTOS:
+            st.session_state.reintentos_sesion = intento
+            if codigo == "PGRST301":
+                db.renovar_sesion()
+            time.sleep(intento)          # 1 segundo, luego 2
+            st.rerun()
+
+        st.session_state.pop("reintentos_sesion", None)
+        st.warning("Tu sesión necesita renovarse. Vuelve a ingresar, por favor.")
+        if st.button("Ingresar de nuevo", type="primary"):
+            db.cerrar_sesion()
+            sesion.borrar_token()
+            st.session_state.clear()
+            st.rerun()
 
 
 main()

@@ -279,7 +279,7 @@ def precios_de(ids_sku: list[int], ids_sede: list[int]) -> list[dict]:
     filas, desde, tamano = [], 0, 1000
     while True:
         pagina = conectar().table("m_precios") \
-            .select("id_precio, id_sede, id_sku, precio") \
+            .select("id_precio, id_sede, id_sku, precio, fecha_confirmacion") \
             .in_("id_sku", ids_sku).in_("id_sede", ids_sede) \
             .eq("activo", True).range(desde, desde + tamano - 1).execute().data
         filas.extend(pagina)
