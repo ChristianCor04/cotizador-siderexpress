@@ -98,6 +98,15 @@ def reanudar_sesion(refresh_token: str) -> dict | None:
     return perfil[0] if perfil else None
 
 
+def renovar_sesion() -> bool:
+    """Pide un token nuevo con la sesión actual. Devuelve False si no se pudo."""
+    try:
+        conectar().auth.refresh_session()
+        return True
+    except Exception:
+        return False
+
+
 def cerrar_sesion():
     try:
         conectar().auth.sign_out()
