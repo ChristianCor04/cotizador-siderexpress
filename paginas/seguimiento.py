@@ -36,6 +36,10 @@ def mostrar(usuario: dict):
         st.info("Esta pantalla es para supervisores y administradores.")
         return
 
+    mensaje = st.session_state.pop("seg_mensaje", None)
+    if mensaje:
+        st.success(mensaje)
+
     desde, hasta = _selector_periodo(usuario)
 
     resumen = db.seguimiento_resumen(desde, hasta)
@@ -63,6 +67,10 @@ def mostrar(usuario: dict):
         _exportar_formato_cotizadores(desde, hasta)
     with col_rangos:
         _exportar_rangos_precios()
+
+    # Método de asignación de cada zona y distritos sin ferretería principal.
+    # Vino de la pantalla de Ferreterías al simplificarla.
+    _panel_cobertura_zonas(usuario)
 
 
 # ==================================================== selector de fechas ===
@@ -435,3 +443,51 @@ def _excel_rangos(rangos, detalle) -> bytes:
                     for (celda,) in hoja.iter_rows(min_row=2, min_col=i, max_col=i):
                         celda.number_format = '0.0"%"'
     return buffer.getvalue()
+
+
+# ===================================================== cobertura por zona ===
+def _cambiar_metodo(id_zona, nombre):
+    metodo = st.session_state.get(f"metodo_{id_zona}")
+    if not metodo:
+        return
+    try:
+        db.cambiar_metodo_zona(id_zona, metodo)
+        db.limpiar_cache()
+        st.session_state.seg_mensaje = f"{nombre} ahora cotiza por {metodo}."
+    except Exception as e:
+        st.session_state.seg_mensaje = None
+        st.error(f"No se pudo cambiar el método: {e}")
+
+
+def _panel_cobertura_zonas(usuario):
+    """Método de cada zona y distritos sin cobertura principal.
+
+    Cada zona pasa de radio a cobertura cuando su cobertura está cargada;
+    hasta entonces sigue cotizando como antes. Cambiar el método es del master.
+    """
+    zonas = db.zonas_con_metodo()
+    if not zonas:
+        return
+    with st.expander("Cobertura por zona"):
+        for z in zonas:
+            distritos = db.cobertura_distritos(z["nombre"])
+            sin_principal = [d for d in distritos if d["sin_principal"]]
+            col_t, col_m = st.columns([3, 1.4], vertical_alignment="center")
+            col_t.markdown(
+                f"**{z['nombre']}** · {len(distritos)} distritos atendidos · "
+                + (f":orange[{len(sin_principal)} sin ferretería principal]" if sin_principal
+                   else "todos con ferretería principal"))
+            if usuario["rol"] == "master":
+                # Se guarda solo cuando el master toca el selector. Comparar en
+                # cada recarga podía entrar en un ciclo si el cambio no llegaba
+                # a guardarse.
+                col_m.segmented_control(
+                    "Método", ["radio", "cobertura"], default=z["metodo_asignacion"],
+                    key=f"metodo_{z['id_zona']}", label_visibility="collapsed",
+                    on_change=_cambiar_metodo, args=(z["id_zona"], z["nombre"]))
+            else:
+                col_m.caption(f"Cotiza por {z['metodo_asignacion']}")
+            if sin_principal:
+                st.caption("Sin principal: " + ", ".join(
+                    (d["distrito"] or "").replace("_", " ").title() for d in sin_principal[:15])
+                    + (" …" if len(sin_principal) > 15 else ""))

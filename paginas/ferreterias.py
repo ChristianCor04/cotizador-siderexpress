@@ -1,39 +1,48 @@
 """
 PANTALLA DE FERRETERÍAS
 =======================
-Crear y editar ferreterías y sedes, con un mapa de todas las ubicaciones.
+Tres pasos, de arriba hacia abajo:
+  1. Elegir o crear la ferretería.
+  2. Sus sedes: elegir una o agregar otra.
+  3. La cobertura de la sede elegida: distritos y nivel.
 
 Reglas que impone la base, no esta pantalla:
   - El código de cada sede se genera solo: prefijo de la zona + siguiente
-    número libre (TRUJ014, CIX041). No se edita: es la llave del Excel.
+    número libre. No se edita: es la llave de la plantilla de Excel.
   - El distrito sale de las coordenadas.
-  - El supervisor crea sedes solo en sus zonas. Abrir una zona nueva es del
-    master.
+  - Cada sede cubre su propio distrito como principal.
+  - El supervisor crea y edita sedes y cobertura solo en sus zonas.
   - Nada se borra: ferreterías y sedes se desactivan.
+
+El método de cada zona y los distritos sin ferretería principal están en
+Seguimiento.
 """
 import pandas as pd
-import pydeck as pdk
 import streamlit as st
 
 import db
 from logica.catalogo import es_identico, parecidos
 from logica.geo import extraer_coordenadas
 
-ROJO = [208, 2, 27, 230]
-AZUL = [24, 95, 165, 200]
-
-# Tamaño de los puntos del mapa, en píxeles de pantalla. El punto se ajusta
-# al zoom, pero nunca baja del mínimo ni pasa del máximo.
-#   Para achicarlos: baja los máximos. Para agrandarlos: súbelos.
-PUNTO_OTRAS = {"minimo": 4, "maximo": 7}
-PUNTO_ELEGIDA = {"minimo": 6, "maximo": 11}
+NIVELES = {1: "Principal", 2: "Secundaria", 3: "Terciaria"}
+NIVEL_DE_TEXTO = {v: k for k, v in NIVELES.items()}
 
 
 def _preparar_memoria():
-    for clave, valor in {"fer_seleccionada": None, "fer_modo": None,
-                         "fer_sede_edicion": None, "fer_version": 0}.items():
+    for clave, valor in {"fer_seleccionada": None, "fer_sede": None,
+                         "fer_modo": None, "fer_version": 0}.items():
         if clave not in st.session_state:
             st.session_state[clave] = valor
+
+
+def _cambiar_modo(modo, seleccionada="sin cambio"):
+    """Cambia lo que muestra la pantalla y limpia los formularios abiertos."""
+    st.session_state.fer_modo = modo
+    if seleccionada != "sin cambio":
+        st.session_state.fer_seleccionada = seleccionada
+        st.session_state.fer_sede = None
+    st.session_state.fer_version += 1
+    st.rerun()
 
 
 def mostrar(usuario: dict):
@@ -46,260 +55,210 @@ def mostrar(usuario: dict):
     if mensaje:
         st.success(mensaje)
 
-    sedes = db.sedes_mapa()
     ferreterias = db.ferreterias_todas()
+    sedes = db.sedes_mapa()
 
-    _indicadores(ferreterias, sedes)
-    _panel_cobertura_zonas(usuario)
-
-    col_lista, col_mapa = st.columns([1, 2.4], gap="medium")
-    with col_lista:
-        zona = _lista(ferreterias, sedes)
-    with col_mapa:
-        _mapa(sedes, zona)
-
-    st.divider()
-    _formularios(usuario, ferreterias, sedes)
-
-
-# ========================================================== indicadores ===
-def _indicadores(ferreterias, sedes):
-    activas = [s for s in sedes if s["activo"]]
-    sin_coords = [s for s in activas if s["verificacion"] == "sin_coordenadas"]
-    no_coincide = [s for s in activas if s["verificacion"] == "no_coincide"]
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Ferreterías", sum(1 for f in ferreterias if f["activo"]))
-    c2.metric("Sedes activas", len(activas))
-    c3.metric("Sin coordenadas", len(sin_coords),
-              help="No aparecen en la búsqueda por distancia al cotizar.")
-    c4.metric("Distrito no coincide", len(no_coincide),
-              help="El distrito cargado no es el que dicen sus coordenadas.")
-
-    problemas = sin_coords + no_coincide
-    if problemas:
-        with st.expander(f"Revisar {len(problemas)} sede(s) con problemas"):
-            for sede in problemas:
-                col_t, col_b = st.columns([4, 1], vertical_alignment="center")
-                if sede["verificacion"] == "sin_coordenadas":
-                    col_t.caption(f"**{sede['codigo']}** · {sede['ferreteria']} · sin coordenadas: "
-                                  "agrégalas editando la sede")
-                    continue
-                col_t.caption(f"**{sede['codigo']}** · {sede['ferreteria']} · cargada en "
-                              f"{(sede['distrito'] or '').title()}, pero sus coordenadas son de otro distrito")
-                # Reescribir las mismas coordenadas hace que la base recalcule el distrito
-                if col_b.button("Corregir", key=f"corregir_{sede['id_sede']}", width="stretch"):
-                    try:
-                        db.actualizar_sede(sede["id_sede"], {"latitud": sede["latitud"],
-                                                             "longitud": sede["longitud"]})
-                        db.limpiar_cache()
-                        st.session_state.fer_mensaje = f"Distrito de {sede['codigo']} corregido."
-                        st.rerun()
-                    except Exception as e:
-                        st.error(_error(e))
-
-
-# ================================================================ lista ===
-def _lista(ferreterias, sedes):
-    buscar = st.text_input("Buscar", placeholder="Buscar ferretería",
-                           label_visibility="collapsed")
-    zonas = sorted({s["zona"] for s in sedes if s.get("zona")})
-    zona = st.segmented_control("Zona", ["Todas"] + zonas, default="Todas",
-                                label_visibility="collapsed", key="fer_zona") or "Todas"
-
-    por_ferreteria = {}
-    for s in sedes:
-        if s["activo"]:
-            por_ferreteria.setdefault(s["id_ferreteria"], []).append(s)
-
-    inactivas = sum(1 for f in ferreterias if not f["activo"])
-    ver_inactivas = st.toggle(f"Ver inactivas ({inactivas})", key="fer_ver_inactivas",
-                              disabled=not inactivas)
-    lista = [f for f in ferreterias if f["activo"] or ver_inactivas]
-    if buscar:
-        lista = [f for f in lista if buscar.lower() in f["nombre"].lower()]
-    if zona != "Todas":
-        lista = [f for f in lista
-                 if any(s["zona"] == zona for s in por_ferreteria.get(f["id_ferreteria"], []))]
-
-    col_f, col_s = st.columns(2)
-    if col_f.button("＋ Ferretería", width="stretch"):
-        _cambiar_modo("nueva_ferreteria", None)
-    if col_s.button("＋ Sede", width="stretch",
-                    disabled=st.session_state.fer_seleccionada is None,
-                    help="Elige primero una ferretería"):
-        _cambiar_modo("nueva_sede")
-
-    with st.container(height=430):
-        for f in lista:
-            propias = por_ferreteria.get(f["id_ferreteria"], [])
-            sin_coords = sum(1 for s in propias if s["verificacion"] == "sin_coordenadas")
-            elegida = st.session_state.fer_seleccionada == f["id_ferreteria"]
-            with st.container(border=True):
-                st.markdown(f"**{f['nombre']}**" + ("" if f["activo"] else " · :gray[inactiva]"))
-                detalle = f"{len(propias)} sede{'s' if len(propias) != 1 else ''}"
-                if f.get("ruc"):
-                    detalle += f" · RUC {f['ruc']}"
-                st.caption(detalle)
-                if sin_coords:
-                    st.caption(f":orange[{sin_coords} sin coordenadas]")
-                if st.button("Seleccionada" if elegida else "Ver",
-                             key=f"fer_ver_{f['id_ferreteria']}", width="stretch",
-                             disabled=elegida):
-                    st.session_state.fer_seleccionada = f["id_ferreteria"]
-                    _cambiar_modo(None)
-        if not lista:
-            st.caption("No hay ferreterías con ese filtro.")
-    return zona
-
-
-def _zonas_del_usuario(usuario) -> set | None:
-    """Zonas que cubre el usuario. None = todas (master)."""
-    if usuario["rol"] == "master":
-        return None
-    return {z.get("id_zona") for z in (usuario.get("rel_usuarios_zonas") or [])}
-
-
-def _cambiar_modo(modo, seleccionada="sin cambio"):
-    st.session_state.fer_modo = modo
-    if seleccionada != "sin cambio":
-        st.session_state.fer_seleccionada = seleccionada
-    st.session_state.fer_sede_edicion = None
-    st.session_state.fer_version += 1
-    st.rerun()
-
-
-# ================================================================= mapa ===
-def _mapa(sedes, zona):
-    puntos = [s for s in sedes if s["activo"] and s["latitud"] is not None
-              and (zona == "Todas" or s["zona"] == zona)]
-    if not puntos:
-        st.info("No hay sedes con coordenadas para mostrar.")
-        return
-
-    tabla = pd.DataFrame(puntos)
-    elegida = st.session_state.fer_seleccionada
-    tabla["distrito"] = tabla["distrito"].fillna("").str.replace("_", " ").str.title()
-
-    # El mapa se centra en la ferretería elegida si tiene sedes; si no, en todo
-    foco = tabla[tabla["id_ferreteria"] == elegida] if elegida in set(tabla["id_ferreteria"]) else tabla
-    lat, lon = foco["latitud"].mean(), foco["longitud"].mean()
-    extension = max(tabla["latitud"].max() - tabla["latitud"].min(),
-                    tabla["longitud"].max() - tabla["longitud"].min())
-    zoom = 12 if extension < 0.1 else 11 if extension < 0.3 else 9 if extension < 1 else 7 if extension < 4 else 5
-
-    def capa(datos, color, tamano, id_capa):
-        # El radio va en metros, pero lo que manda es el mínimo y el máximo en
-        # píxeles: así el punto se ve igual de cerca y de lejos.
-        return pdk.Layer(
-            "ScatterplotLayer", data=datos, id=id_capa,
-            get_position="[longitud, latitud]", get_fill_color=color,
-            get_radius=150,
-            radius_min_pixels=tamano["minimo"], radius_max_pixels=tamano["maximo"],
-            stroked=True, get_line_color=[255, 255, 255], line_width_min_pixels=1,
-            pickable=True,
-        )
-
-    # La elegida va en su propia capa, encima, para que se distinga
-    capas = [capa(tabla[tabla["id_ferreteria"] != elegida], AZUL, PUNTO_OTRAS, "sedes")]
-    propias = tabla[tabla["id_ferreteria"] == elegida]
-    if not propias.empty:
-        capas.append(capa(propias, ROJO, PUNTO_ELEGIDA, "elegida"))
-
-    mapa = pdk.Deck(
-        layers=capas,
-        initial_view_state=pdk.ViewState(latitude=lat, longitude=lon, zoom=zoom),
-        map_provider="carto", map_style="dark",
-        tooltip={"html": "<b>{ferreteria}</b><br/>{sede} · {codigo}<br/>{distrito} · {precios} precios",
-                 "style": {"fontSize": "12px"}},
-    )
-
-    # Al hacer clic en un pin se selecciona su ferretería
-    evento = st.pydeck_chart(mapa, height=480, on_select="rerun",
-                             selection_mode="single-object", key="mapa_sedes")
-    try:
-        objetos = (evento.selection.objects.get("sedes") or
-                   evento.selection.objects.get("elegida") or [])
-    except AttributeError:
-        objetos = []
-    _procesar_clic_mapa(objetos)
-
-    st.caption(":red[●] ferretería elegida  ·  :blue[●] las demás  ·  "
-               "pasa el mouse sobre un punto para ver el detalle")
-
-
-def _procesar_clic_mapa(objetos):
-    """Cambia de ferretería solo cuando hay un clic NUEVO en el mapa.
-
-    El mapa recuerda el último punto seleccionado y lo devuelve en cada
-    recarga de la página. Si se reaccionara siempre, al escribir en cualquier
-    formulario la página volvería a la ferretería de ese clic viejo y
-    descartaría lo escrito. Por eso se guarda qué clic ya se atendió.
-    """
-    firma = tuple(sorted(o.get("id_sede") for o in objetos)) if objetos else None
-    if firma == st.session_state.get("fer_mapa_atendido"):
-        return
-    st.session_state.fer_mapa_atendido = firma
-    if not objetos:
-        return
-
-    id_f = objetos[0]["id_ferreteria"]
-    if id_f != st.session_state.fer_seleccionada:
-        st.session_state.fer_seleccionada = id_f
-        _cambiar_modo(None)
-
-
-# ========================================================== formularios ===
-def _formularios(usuario, ferreterias, sedes):
+    elegida = _paso_ferreteria(ferreterias, sedes)
     modo = st.session_state.fer_modo
-    elegida = next((f for f in ferreterias
-                    if f["id_ferreteria"] == st.session_state.fer_seleccionada), None)
 
     if modo == "nueva_ferreteria":
-        _form_nueva_ferreteria(ferreterias)
+        with st.container(border=True):
+            _form_nueva_ferreteria(ferreterias)
         return
     if elegida is None:
-        st.caption("Elige una ferretería en la lista o en el mapa para ver y editar sus sedes.")
+        return
+    if modo == "editar_ferreteria":
+        with st.container(border=True):
+            _form_editar_ferreteria(elegida, ferreterias)
         return
 
     propias = [s for s in sedes if s["id_ferreteria"] == elegida["id_ferreteria"]]
-    if modo == "nueva_sede":
-        _form_nueva_sede(usuario, elegida)
-    elif modo == "editar_ferreteria":
-        _form_editar_ferreteria(elegida, ferreterias)
-    else:
-        _detalle_ferreteria(elegida, propias, usuario)
+    sede = _paso_sedes(usuario, elegida, propias)
+    if sede and st.session_state.fer_modo != "nueva_sede":
+        _paso_cobertura(usuario, sede)
 
 
-def _detalle_ferreteria(ferreteria, propias, usuario):
-    col_t, col_b = st.columns([3, 1], vertical_alignment="bottom")
-    col_t.markdown(f"#### {ferreteria['nombre']}")
-    if col_b.button("Editar ferretería", width="stretch"):
-        _cambiar_modo("editar_ferreteria")
+# =============================================================== paso 1 ===
+def _paso_ferreteria(ferreterias, sedes):
+    with st.container(border=True):
+        st.markdown("**1 · Ferretería**")
+        ver_inactivas = st.toggle("Incluir inactivas", key="fer_ver_inactivas",
+                                  disabled=not any(not f["activo"] for f in ferreterias))
+        lista = [f for f in ferreterias if f["activo"] or ver_inactivas]
+        ids = [f["id_ferreteria"] for f in lista]
+        por_id = {f["id_ferreteria"]: f for f in lista}
 
-    if not propias:
-        st.caption("Esta ferretería todavía no tiene sedes.")
+        col_s, col_n = st.columns([3, 1], vertical_alignment="bottom")
+        actual = st.session_state.fer_seleccionada
+        elegido = col_s.selectbox(
+            "Ferretería", [None] + ids,
+            index=([None] + ids).index(actual) if actual in ids else 0,
+            format_func=lambda i: "Elige una ferretería…" if i is None
+            else por_id[i]["nombre"] + ("" if por_id[i]["activo"] else " · inactiva"),
+            label_visibility="collapsed", key=f"fer_selector_{st.session_state.fer_version}")
+        if col_n.button("＋ Nueva ferretería", width="stretch"):
+            _cambiar_modo("nueva_ferreteria", None)
+
+        if elegido != actual:
+            st.session_state.fer_seleccionada = elegido
+            st.session_state.fer_sede = None
+            st.session_state.fer_modo = None
+            st.rerun()
+
+        if elegido is None:
+            return None
+        ferreteria = por_id[elegido]
+        activas = sum(1 for s in sedes if s["id_ferreteria"] == elegido and s["activo"])
+        col_d, col_e = st.columns([3, 1], vertical_alignment="center")
+        detalle = f"{activas} sede{'s' if activas != 1 else ''} activa{'s' if activas != 1 else ''}"
+        if ferreteria.get("ruc"):
+            detalle = f"RUC {ferreteria['ruc']} · " + detalle
+        col_d.caption(detalle)
+        if col_e.button("Editar ferretería", width="stretch"):
+            _cambiar_modo("editar_ferreteria")
+        return ferreteria
+
+
+# =============================================================== paso 2 ===
+def _paso_sedes(usuario, ferreteria, propias):
+    with st.container(border=True):
+        col_t, col_b = st.columns([3, 1], vertical_alignment="center")
+        col_t.markdown(f"**2 · Sedes de {ferreteria['nombre']}**")
+        if col_b.button("＋ Nueva sede", width="stretch"):
+            _cambiar_modo("nueva_sede")
+
+        if st.session_state.fer_modo == "nueva_sede":
+            _form_nueva_sede(usuario, ferreteria)
+            return None
+
+        if not propias:
+            st.caption("Esta ferretería todavía no tiene sedes.")
+            return None
+
+        tabla = pd.DataFrame([{
+            "Código": s["codigo"], "Sede": s["sede"],
+            "Distrito": (s["distrito"] or "").replace("_", " ").title(),
+            "Zona": s["zona"] or "Sin zona",
+            "Estado": "Activa" if s["activo"] else "Inactiva",
+            "Ubicación": {"coincide": "OK", "sin_coordenadas": "Sin coordenadas",
+                          "no_coincide": "Distrito no coincide",
+                          "fuera_de_poligonos": "Fuera de los mapas"}.get(s["verificacion"], ""),
+        } for s in propias])
+        evento = st.dataframe(
+            tabla, hide_index=True, width="stretch", on_select="rerun",
+            selection_mode="single-row",
+            key=f"fer_tabla_sedes_{ferreteria['id_ferreteria']}_{st.session_state.fer_version}")
+        filas = evento.selection.rows if evento and evento.selection else []
+        if filas:
+            st.session_state.fer_sede = propias[filas[0]]["id_sede"]
+        elif st.session_state.fer_sede not in {s["id_sede"] for s in propias}:
+            st.session_state.fer_sede = None
+
+        if st.session_state.fer_sede is None:
+            st.caption("Haz clic en una sede para editarla y ver su cobertura.")
+            return None
+        return next(s for s in propias if s["id_sede"] == st.session_state.fer_sede)
+
+
+# =============================================================== paso 3 ===
+def _paso_cobertura(usuario, sede):
+    mis_zonas = _zonas_del_usuario(usuario)
+    solo_lectura = mis_zonas is not None and sede.get("id_zona") not in mis_zonas
+
+    with st.container(border=True):
+        st.markdown(f"**3 · Cobertura de {sede['codigo']} · {sede['sede']}**")
+        with st.expander("Datos de la sede"):
+            _form_editar_sede(sede, usuario)
+
+        actual = db.cobertura_de_sede(sede["id_sede"])
+        if solo_lectura:
+            st.info(f"Esta sede es de la zona {sede.get('zona') or 'sin zona'}, que no cubres. "
+                    "Puedes ver su cobertura, pero no editarla.")
+        _tabla_cobertura(sede, actual, solo_lectura)
+        if not solo_lectura:
+            _agregar_cobertura(sede, actual)
+
+
+def _tabla_cobertura(sede, actual, solo_lectura):
+    """Distritos que cubre la sede. El nivel se cambia en la misma tabla."""
+    if not actual:
+        st.caption("Esta sede todavía no cubre ningún distrito.")
         return
 
-    st.dataframe(pd.DataFrame([{
-        "Código": s["codigo"], "Sede": s["sede"],
-        "Distrito": (s["distrito"] or "").replace("_", " ").title(),
-        "Zona": s["zona"], "Precios": s["precios"],
-        "Estado": "Activa" if s["activo"] else "Inactiva",
-        "Ubicación": {"coincide": "OK", "sin_coordenadas": "Sin coordenadas",
-                      "no_coincide": "Distrito no coincide",
-                      "fuera_de_poligonos": "Fuera de los mapas"}.get(s["verificacion"], ""),
-    } for s in propias]), hide_index=True, width="stretch")
+    propio = sede.get("id_distrito")
+    original = pd.DataFrame([{
+        "id_distrito": c["id_distrito"],
+        "Distrito": (c["distrito"] or "").replace("_", " ").title()
+                    + (" · distrito propio" if c["id_distrito"] == propio else ""),
+        "Zona": c["zona"] or "Sin zona",
+        "Nivel": NIVELES.get(c["nivel"], str(c["nivel"])),
+        "Quitar": False,
+    } for c in actual])
 
-    sede = st.selectbox("Editar una sede", [None] + propias, index=0,
-                        format_func=lambda s: "Elige una sede…" if s is None
-                        else f"{s['codigo']} · {s['sede']}",
-                        key=f"fer_editar_sede_{st.session_state.fer_version}")
-    if sede:
-        _form_editar_sede(sede, usuario)
+    v = f"{st.session_state.fer_version}_{sede['id_sede']}"
+    editada = st.data_editor(
+        original, hide_index=True, width="stretch", disabled=solo_lectura,
+        column_order=["Distrito", "Zona", "Nivel", "Quitar"],
+        column_config={
+            "Distrito": st.column_config.TextColumn(disabled=True),
+            "Zona": st.column_config.TextColumn(disabled=True),
+            "Nivel": st.column_config.SelectboxColumn(options=list(NIVELES.values()), required=True),
+            "Quitar": st.column_config.CheckboxColumn(),
+        }, key=f"cob_tabla_{v}")
+    if solo_lectura:
+        return
+
+    cambios_nivel, quitar, ignorados = {}, [], False
+    for antes, despues in zip(original.to_dict("records"), editada.to_dict("records")):
+        es_propio = antes["id_distrito"] == propio
+        if despues["Quitar"]:
+            if es_propio:
+                ignorados = True
+            else:
+                quitar.append(antes["id_distrito"])
+        elif despues["Nivel"] != antes["Nivel"]:
+            if es_propio and despues["Nivel"] != NIVELES[1]:
+                ignorados = True
+            else:
+                cambios_nivel.setdefault(NIVEL_DE_TEXTO[despues["Nivel"]], []).append(antes["id_distrito"])
+
+    if ignorados:
+        st.caption(":orange[El distrito propio de la sede siempre es principal: ese cambio no se guarda.]")
+
+    hay_cambios = bool(cambios_nivel or quitar)
+    if st.button("Guardar cambios de cobertura", type="primary", disabled=not hay_cambios,
+                 key=f"cob_guardar_{v}"):
+        def aplicar():
+            for nivel, ids in cambios_nivel.items():
+                db.cubrir_distritos(sede["id_sede"], nivel, ids)
+            if quitar:
+                db.quitar_cobertura(sede["id_sede"], quitar)
+        partes = []
+        if cambios_nivel:
+            partes.append(f"{sum(len(i) for i in cambios_nivel.values())} cambio(s) de nivel")
+        if quitar:
+            partes.append(f"{len(quitar)} distrito(s) quitados")
+        _guardar_cobertura(aplicar, "Cobertura actualizada: " + ", ".join(partes) + ".")
 
 
-# ----------------------------------------------------- nueva ferretería ---
+def _agregar_cobertura(sede, actual):
+    v = f"{st.session_state.fer_version}_{sede['id_sede']}"
+    ya = {c["id_distrito"] for c in actual}
+    distritos = [d for d in db.catalogo_distritos() if d["id_distrito"] not in ya]
+    nombre = {d["id_distrito"]: _nombre_distrito(d) for d in distritos}
+
+    col_d, col_n, col_b = st.columns([3, 1.2, 1], vertical_alignment="bottom")
+    elegidos = col_d.multiselect("Agregar distritos", list(nombre), format_func=nombre.get,
+                                 placeholder="Elige uno o varios", key=f"cob_add_{v}")
+    nivel = col_n.selectbox("Nivel", [1, 2, 3], format_func=NIVELES.get, key=f"cob_nivel_{v}")
+    if col_b.button("Agregar", width="stretch", disabled=not elegidos, key=f"cob_btn_{v}"):
+        _guardar_cobertura(lambda: db.cubrir_distritos(sede["id_sede"], nivel, elegidos),
+                           f"{len(elegidos)} distrito(s) agregados como {NIVELES[nivel].lower()}.")
+
+
+# ====================================================== formularios ===
+
+
 def _form_nueva_ferreteria(ferreterias):
     st.markdown("#### Nueva ferretería")
     v = st.session_state.fer_version
@@ -388,6 +347,8 @@ def _form_editar_ferreteria(ferreteria, ferreterias):
 
 
 # ---------------------------------------------------------- nueva sede ---
+
+
 def _form_nueva_sede(usuario, ferreteria):
     st.markdown(f"#### Nueva sede de {ferreteria['nombre']}")
     v = st.session_state.fer_version
@@ -483,6 +444,8 @@ def _abrir_zona(usuario, geo):
 
 
 # --------------------------------------------------------- editar sede ---
+
+
 def _form_editar_sede(sede, usuario):
     v = f"{st.session_state.fer_version}_{sede['id_sede']}"
     mis_zonas = _zonas_del_usuario(usuario)
@@ -541,61 +504,13 @@ def _form_editar_sede(sede, usuario):
         if error:
             st.caption(f":orange[{error}]")
 
-    _cobertura_de_sede(sede, solo_lectura)
 
 
-# ============================================================ cobertura ===
-NIVELES = {1: "Principal", 2: "Secundaria", 3: "Terciaria"}
-
-
-def _cobertura_de_sede(sede, solo_lectura):
-    """Qué distritos atiende la sede y con qué prioridad.
-
-    Es lo que usa la cotización en las zonas que trabajan por cobertura: con
-    montos bajos compiten las sedes que cubren el distrito de la obra,
-    empezando por las principales.
-    """
-    v = f"{st.session_state.fer_version}_{sede['id_sede']}"
-    actual = db.cobertura_de_sede(sede["id_sede"])
-
-    with st.container(border=True):
-        st.markdown(f"**Cobertura de {sede['codigo']}** · {len(actual)} distrito(s)")
-        if actual:
-            st.dataframe(pd.DataFrame([{
-                "Distrito": (c["distrito"] or "").replace("_", " ").title(),
-                "Provincia": (c["provincia"] or "").title(),
-                "Zona": c["zona"] or "Sin zona",
-                "Nivel": NIVELES.get(c["nivel"], c["nivel"]),
-            } for c in actual]), hide_index=True, width="stretch")
-        else:
-            st.caption("Esta sede todavía no cubre ningún distrito.")
-
-        if solo_lectura:
-            return
-
-        distritos = db.catalogo_distritos()
-        nombre_distrito = {d["id_distrito"]: _nombre_distrito(d) for d in distritos}
-
-        st.caption("Agregar o cambiar el nivel. Un distrito que ya cubre toma el nivel nuevo.")
-        col_d, col_n, col_b = st.columns([3, 1.2, 1], vertical_alignment="bottom")
-        elegidos = col_d.multiselect(
-            "Distritos", [d["id_distrito"] for d in distritos],
-            format_func=lambda i: nombre_distrito.get(i, str(i)), key=f"cob_add_{v}",
-            placeholder="Elige uno o varios distritos")
-        nivel = col_n.selectbox("Nivel", [1, 2, 3], format_func=NIVELES.get, key=f"cob_nivel_{v}")
-        if col_b.button("Agregar", width="stretch", disabled=not elegidos, key=f"cob_btn_{v}"):
-            _guardar_cobertura(lambda: db.cubrir_distritos(sede["id_sede"], nivel, elegidos),
-                               f"{len(elegidos)} distrito(s) con cobertura {NIVELES[nivel].lower()}.")
-
-        if actual:
-            col_q, col_bq = st.columns([4.2, 1], vertical_alignment="bottom")
-            quitar = col_q.multiselect(
-                "Quitar", [c["id_distrito"] for c in actual],
-                format_func=lambda i: nombre_distrito.get(i, str(i)), key=f"cob_del_{v}",
-                placeholder="Distritos que ya no atiende")
-            if col_bq.button("Quitar", width="stretch", disabled=not quitar, key=f"cob_btnq_{v}"):
-                _guardar_cobertura(lambda: db.quitar_cobertura(sede["id_sede"], quitar),
-                                   f"{len(quitar)} distrito(s) quitados de la cobertura.")
+def _zonas_del_usuario(usuario) -> set | None:
+    """Zonas que cubre el usuario. None = todas (master)."""
+    if usuario["rol"] == "master":
+        return None
+    return {z.get("id_zona") for z in (usuario.get("rel_usuarios_zonas") or [])}
 
 
 def _nombre_distrito(d) -> str:
@@ -613,54 +528,7 @@ def _guardar_cobertura(accion, mensaje):
         st.error(_error(e))
 
 
-def _cambiar_metodo(id_zona, nombre):
-    metodo = st.session_state.get(f"metodo_{id_zona}")
-    if not metodo:
-        return
-    try:
-        db.cambiar_metodo_zona(id_zona, metodo)
-        db.limpiar_cache()
-        st.session_state.fer_mensaje = f"{nombre} ahora cotiza por {metodo}."
-    except Exception as e:
-        st.session_state.fer_mensaje = None
-        st.error(_error(e))
-
-
-def _panel_cobertura_zonas(usuario):
-    """Método de cada zona y distritos sin cobertura principal.
-
-    Cada zona pasa de radio a cobertura cuando su cobertura está cargada;
-    hasta entonces sigue cotizando como antes. Cambiar el método es del master.
-    """
-    zonas = db.zonas_con_metodo()
-    if not zonas:
-        return
-    with st.expander("Cobertura por zona"):
-        for z in zonas:
-            distritos = db.cobertura_distritos(z["nombre"])
-            sin_principal = [d for d in distritos if d["sin_principal"]]
-            col_t, col_m = st.columns([3, 1.4], vertical_alignment="center")
-            col_t.markdown(
-                f"**{z['nombre']}** · {len(distritos)} distritos atendidos · "
-                + (f":orange[{len(sin_principal)} sin ferretería principal]" if sin_principal
-                   else "todos con ferretería principal"))
-            if usuario["rol"] == "master":
-                # Se guarda solo cuando el master toca el selector. Comparar en
-                # cada recarga podía entrar en un ciclo si el cambio no llegaba
-                # a guardarse.
-                col_m.segmented_control(
-                    "Método", ["radio", "cobertura"], default=z["metodo_asignacion"],
-                    key=f"metodo_{z['id_zona']}", label_visibility="collapsed",
-                    on_change=_cambiar_metodo, args=(z["id_zona"], z["nombre"]))
-            else:
-                col_m.caption(f"Cotiza por {z['metodo_asignacion']}")
-            if sin_principal:
-                st.caption("Sin principal: " + ", ".join(
-                    (d["distrito"] or "").replace("_", " ").title() for d in sin_principal[:15])
-                    + (" …" if len(sin_principal) > 15 else ""))
-
-
-# =============================================================== errores ===
+# ============================================================= errores ===
 def _error(e) -> str:
     detalle = str(e)
     if "uq_ferreteria_nombre" in detalle:
