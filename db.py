@@ -291,11 +291,15 @@ def precios_de(ids_sku: list[int], ids_sede: list[int]) -> list[dict]:
 
 
 @st.cache_data(ttl=600)
-def precios_referenciales() -> dict[int, float]:
-    """Precio promedio por producto. Sirve para decidir el radio de búsqueda."""
-    filas = conectar().table("v_precios_referenciales") \
-        .select("id_producto, precio_promedio").execute().data
-    return {f["id_producto"]: float(f["precio_promedio"]) for f in filas}
+@st.cache_data(ttl=600)
+def precios_referenciales() -> dict[int, tuple[float, int]]:
+    """Precio promedio de mercado por SKU: {id_sku: (promedio, sedes)}.
+
+    Es por SKU y no por producto: el promedio por producto mezclaba la varilla
+    con la tonelada y la canasta salía valorada muy por encima de lo real.
+    """
+    filas = _leer_todo("v_precios_referencia_sku", ["id_sku"])
+    return {f["id_sku"]: (float(f["precio_promedio"]), int(f["n_sedes"] or 0)) for f in filas}
 
 
 # ===========================================================================

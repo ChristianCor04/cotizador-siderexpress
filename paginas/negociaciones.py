@@ -17,7 +17,7 @@ import config
 import db
 from logica.cotizacion import (cotizar_en_sedes, elegir_regla, monto_referencial,
                                sedes_candidatas, seleccionar_por_cobertura)
-from logica.geo import extraer_coordenadas, sedes_cercanas
+from logica.geo import distancia_km, extraer_coordenadas, sedes_cercanas
 from logica.pdf import generar_pdf
 
 
@@ -1048,6 +1048,7 @@ def _recotizar():
     # Si la zona de la obra ya trabaja por cobertura, se usa la lógica nueva.
     # Las zonas que siguen con radio pasan al bloque de abajo, sin cambios.
     if _cotizar_por_cobertura(lineas, coords, id_distrito, monto):
+        _incluir_cotizadas_antes(lineas, coords)
         return
 
     st.session_state.asignacion = None
@@ -1085,6 +1086,50 @@ def _recotizar():
     st.session_state.regla = regla
     st.session_state.monto_ref = monto
     st.session_state.sede_elegida = None
+    _incluir_cotizadas_antes(lineas, coords)
+
+
+def _incluir_cotizadas_antes(lineas, coords):
+    """Las sedes con las que ya se cotizó en esta negociación siempre aparecen.
+
+    La búsqueda solo muestra a las que ganan con la canasta y el alcance de
+    ahora. Si el cliente vuelve para modificar su pedido con la misma
+    ferretería, esa ferretería podía quedar fuera: por un producto nuevo que
+    no tiene, porque otra de mejor nivel ya tenía todo, o porque la ciudad
+    cambió de método. Se agregan aunque estén fuera del alcance o con
+    faltantes, marcadas, y van primero.
+    """
+    resultados = st.session_state.resultados or []
+    negociacion = st.session_state.negociacion or {}
+    if not resultados or not negociacion.get("id_negociacion"):
+        return
+
+    previas = {c["id_sede"] for c in db.cotizaciones_de(negociacion["id_negociacion"])
+               if c.get("id_sede")}
+    if not previas:
+        return
+
+    faltan = previas - {r["id_sede"] for r in resultados}
+    if faltan:
+        sedes = [dict(s) for s in db.catalogo_sedes() if s["id_sede"] in faltan]
+        for sede in sedes:
+            sede["distancia_km"] = (
+                round(distancia_km(coords[0], coords[1], sede["latitud"], sede["longitud"]), 2)
+                if coords and sede.get("latitud") is not None else None)
+        if sedes:
+            todos_skus = [s for l in lineas for s in l["skus_posibles"]]
+            precios = db.precios_de(todos_skus, [s["id_sede"] for s in sedes])
+            extra = cotizar_en_sedes(lineas, sedes, precios, una_por_ferreteria=False)
+            for r in extra:
+                r["cobertura"] = "Fuera del alcance de esta búsqueda"
+            resultados = resultados + extra
+
+    for r in resultados:
+        if r["id_sede"] in previas:
+            r["cotizada_antes"] = True
+    # sorted es estable: entre las cotizadas antes y entre las demás se
+    # conserva el orden de la búsqueda
+    st.session_state.resultados = sorted(resultados, key=lambda r: not r.get("cotizada_antes"))
 
 
 # Antigüedad de los precios en la tarjeta de cada ferretería. Mismos cortes
@@ -1178,7 +1223,8 @@ def _bloque_ferreterias(usuario):
         limite = st.slider("Mostrar hasta … productos faltantes", 0, maximo,
                            config.FALTANTES_POR_DEFECTO)
 
-    visibles = [r for r in resultados if r["n_faltantes"] <= limite]
+    # Las ya cotizadas con este cliente se muestran aunque tengan faltantes
+    visibles = [r for r in resultados if r["n_faltantes"] <= limite or r.get("cotizada_antes")]
     if not visibles:
         st.warning("Ninguna ferretería tiene la canasta completa. Sube el filtro para ver las parciales.")
         return
@@ -1230,6 +1276,8 @@ def _tarjeta_ferreteria(r):
         if ultima.get("id_sede") == r["id_sede"]:
             st.caption(":orange[↺ Ferretería de la última cotización]")
 
+        if r.get("cotizada_antes"):
+            st.caption(":blue[★ Ya se cotizó con esta sede en esta negociación]")
         detalles = []
         if r.get("cobertura"):
             detalles.append(r["cobertura"])

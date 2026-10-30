@@ -14,17 +14,32 @@ en la tabla m_reglas_cotizacion.
 from logica.geo import distancia_km, sedes_cercanas
 
 
-def monto_referencial(lineas: list[dict], precios_ref: dict[int, float]) -> float:
+def monto_referencial(lineas: list[dict], precios_ref: dict) -> float:
     """Cuánto vale la canasta a precio promedio de mercado.
 
-    Este monto NO es lo que paga el cliente: solo sirve para decidir
-    qué tan lejos se buscan ferreterías.
+    Este monto NO es lo que paga el cliente: solo sirve para decidir qué tan
+    amplia es la búsqueda de ferreterías.
+
+    Cada línea se valora con los SKU que realmente pidió: su producto, su
+    unidad y su marca, si la eligió. Si no eligió marca, se promedian las
+    marcas de esa unidad, pesando por cuántas sedes tienen cada una. Nunca se
+    mezclan unidades: la varilla y la tonelada tienen precios incomparables.
+
+    precios_ref: {id_sku: (promedio, sedes)}
     """
     total = 0.0
     for linea in lineas:
-        promedio = precios_ref.get(linea["id_producto"])
-        if promedio:
-            total += promedio * linea["cantidad"]
+        suma, pesos = 0.0, 0
+        for id_sku in linea.get("skus_posibles") or []:
+            dato = precios_ref.get(id_sku)
+            if not dato:
+                continue
+            promedio, sedes = dato if isinstance(dato, tuple) else (dato, 1)
+            peso = max(int(sedes or 0), 1)
+            suma += float(promedio) * peso
+            pesos += peso
+        if pesos:
+            total += (suma / pesos) * float(linea["cantidad"])
     return round(total, 2)
 
 
