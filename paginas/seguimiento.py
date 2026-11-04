@@ -60,13 +60,15 @@ def mostrar(usuario: dict):
 
     _tabla_ferreterias(ferreterias)
 
-    col_resumen, col_formato, col_rangos = st.columns(3)
+    col_resumen, col_formato, col_rangos, col_competencia = st.columns(4)
     with col_resumen:
         _exportar(desde, hasta, resumen, asesores, zonas, perdidas, ferreterias)
     with col_formato:
         _exportar_formato_cotizadores(desde, hasta)
     with col_rangos:
         _exportar_rangos_precios()
+    with col_competencia:
+        _exportar_competencia(desde, hasta)
 
     # Método de asignación de cada zona y distritos sin ferretería principal.
     # Vino de la pantalla de Ferreterías al simplificarla.
@@ -491,3 +493,100 @@ def _panel_cobertura_zonas(usuario):
                 st.caption("Sin principal: " + ", ".join(
                     (d["distrito"] or "").replace("_", " ").title() for d in sin_principal[:15])
                     + (" …" if len(sin_principal) > 15 else ""))
+
+
+# ============================================== competencia por cotización ===
+COLUMNAS_COMPETENCIA = {
+    "id_cotizacion": "Cotización", "id_negociacion": "Negociación", "version": "Versión",
+    "fecha": "Fecha", "asesor": "Asesor", "zona": "Zona", "cliente": "Cliente",
+    "evaluadas": "Ferreterías evaluadas", "completas": "Con canasta completa",
+    "ferreteria_elegida": "Elegida", "monto_elegida": "Monto elegida",
+    "mejor_completa": "Más barata completa", "monto_mejor_completa": "Monto más barata",
+    "sobrecosto_vs_mejor_completa": "Sobrecosto vs más barata",
+    "eligio_la_mas_barata": "¿Eligió la más barata?",
+    "mejor_con_1_faltante": "Mejor con 1 faltante", "faltante_1": "Le faltó",
+    "diferencia_1_faltante": "Diferencia con 1 faltante", "diferencia_1_faltante_pct": "Diferencia % (1 faltante)",
+    "mejor_con_2_faltantes": "Mejor con 2 faltantes", "faltantes_2": "Le faltaron",
+    "diferencia_2_faltantes": "Diferencia con 2 faltantes", "diferencia_2_faltantes_pct": "Diferencia % (2 faltantes)",
+}
+COLUMNAS_COMPETENCIA_DETALLE = {
+    "id_cotizacion": "Cotización", "id_negociacion": "Negociación", "version": "Versión",
+    "fecha": "Fecha", "asesor": "Asesor", "zona": "Zona", "cliente": "Cliente",
+    "ferreteria_elegida": "Elegida", "monto_elegida": "Monto elegida",
+    "ferreteria": "Ferretería", "sede": "Sede", "es_la_elegida": "Es la elegida",
+    "distancia_km": "Km", "n_faltantes": "Faltantes", "faltantes": "Le faltó",
+    "monto_competidora": "Monto de lo que tenía",
+    "monto_competidora_comun": "Monto en productos comunes",
+    "monto_elegida_comun": "Elegida en productos comunes",
+    "diferencia_comun": "Diferencia", "diferencia_pct": "Diferencia %",
+    "dias_precio": "Días del precio",
+}
+
+
+def _exportar_competencia(desde, hasta):
+    """¿Se eligió el mejor precio? Cada cotización del periodo contra su competencia.
+
+    Las incompletas se comparan solo en los productos que tienen en común con
+    la elegida. Una diferencia negativa significa que eran más baratas.
+    """
+    if st.session_state.get("competencia_archivo") is None:
+        if st.button("Preparar competencia", width="stretch",
+                     help="Cada cotización del periodo contra las ferreterías que compitieron: "
+                          "si se eligió la más barata y cuáles eran más baratas aunque les "
+                          "faltaran 1 o 2 productos."):
+            with st.spinner("Armando el archivo…"):
+                resumen = db.competencia_por_cotizacion(desde, hasta)
+                detalle = db.competencia_detalle(desde, hasta)
+                st.session_state.competencia_archivo = _excel_competencia(resumen, detalle)
+                st.session_state.competencia_filas = len(resumen)
+            st.rerun()
+        return
+
+    st.download_button(
+        f"⬇ Competencia · {st.session_state.competencia_filas:,} cotizaciones",
+        data=st.session_state.competencia_archivo,
+        file_name=f"competencia_{desde}_{hasta}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        width="stretch", on_click=lambda: st.session_state.update(competencia_archivo=None),
+    )
+
+
+def _excel_competencia(resumen, detalle) -> bytes:
+    from openpyxl.utils import get_column_letter
+
+    def preparar(filas, columnas):
+        tabla = pd.DataFrame(filas, columns=list(columnas))
+        for col in ("faltante_1", "faltantes_2", "faltantes"):
+            if col in tabla.columns:
+                tabla[col] = tabla[col].apply(lambda v: ", ".join(v) if isinstance(v, list) else (v or ""))
+        for col in ("eligio_la_mas_barata", "es_la_elegida"):
+            if col in tabla.columns:
+                tabla[col] = tabla[col].map({True: "Sí", False: "No"})
+        if "fecha" in tabla.columns:
+            tabla["fecha"] = pd.to_datetime(tabla["fecha"], utc=True) \
+                .dt.tz_convert("America/Lima").dt.strftime("%d/%m/%Y %H:%M")
+        return tabla.rename(columns=columnas)
+
+    hojas = {"Por cotización": preparar(resumen, COLUMNAS_COMPETENCIA),
+             "Detalle de competidoras": preparar(detalle, COLUMNAS_COMPETENCIA_DETALLE)}
+    dinero = {"Monto elegida", "Monto más barata", "Sobrecosto vs más barata",
+              "Diferencia con 1 faltante", "Diferencia con 2 faltantes",
+              "Monto de lo que tenía", "Monto en productos comunes",
+              "Elegida en productos comunes", "Diferencia"}
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        for nombre, tabla in hojas.items():
+            tabla.to_excel(writer, sheet_name=nombre, index=False)
+            hoja = writer.sheets[nombre]
+            hoja.freeze_panes = "A2"
+            hoja.auto_filter.ref = hoja.dimensions
+            for celda in hoja[1]:
+                celda.font = celda.font.copy(bold=True)
+            for i, columna in enumerate(tabla.columns, start=1):
+                hoja.column_dimensions[get_column_letter(i)].width = 24 if columna in (
+                    "Cliente", "Elegida", "Ferretería", "Más barata completa", "Le faltó",
+                    "Le faltaron", "Mejor con 1 faltante", "Mejor con 2 faltantes") else 15
+                if columna in dinero:
+                    for (celda,) in hoja.iter_rows(min_row=2, min_col=i, max_col=i):
+                        celda.number_format = '"S/" #,##0.00'
+    return buffer.getvalue()

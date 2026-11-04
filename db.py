@@ -635,6 +635,27 @@ def agregar_ticket(id_negociacion: int, ticket: str, tipo: str) -> None:
     ).execute()
 
 
+_SELECT_RESUMEN_NEG = ("id_negociacion, estado, fecha_inicio, id_usuario, "
+                       "m_clientes(nombre), m_usuarios!fk_neg_usuario(nombre)")
+
+
+def negociaciones_resumen(ids: list[int]) -> list[dict]:
+    """Datos básicos de varias negociaciones. El RLS limita a las que puedes ver."""
+    if not ids:
+        return []
+    return conectar().table("fact_negociaciones").select(_SELECT_RESUMEN_NEG) \
+        .in_("id_negociacion", list(ids)).execute().data
+
+
+def negociaciones_de_clientes(ids_cliente: list[int]) -> list[dict]:
+    """Negociaciones de esos clientes, de la más nueva a la más vieja."""
+    if not ids_cliente:
+        return []
+    return conectar().table("fact_negociaciones").select(_SELECT_RESUMEN_NEG + ", id_cliente") \
+        .in_("id_cliente", list(ids_cliente)).order("fecha_inicio", desc=True) \
+        .limit(20).execute().data
+
+
 def buscar_por_ticket(ticket: str) -> list[dict]:
     """Negociaciones asociadas a un ticket. El RLS limita a las que puedes ver."""
     return conectar().table("rel_negociacion_tickets") \
@@ -1070,3 +1091,28 @@ def zonas_con_metodo() -> list[dict]:
 def cambiar_metodo_zona(id_zona: int, metodo: str) -> None:
     conectar().table("m_zonas").update({"metodo_asignacion": metodo}) \
         .eq("id_zona", id_zona).execute()
+
+
+def _leer_periodo(vista: str, desde, hasta, orden: list[str]) -> list[dict]:
+    """Lee una vista con fecha entre dos días de Lima, de 1,000 en 1,000."""
+    filas, inicio = [], 0
+    while True:
+        consulta = conectar().table(vista).select("*") \
+            .gte("fecha", f"{desde}T00:00:00-05:00").lte("fecha", f"{hasta}T23:59:59-05:00")
+        for columna in orden:
+            consulta = consulta.order(columna)
+        pagina = consulta.range(inicio, inicio + 999).execute().data
+        filas.extend(pagina)
+        if len(pagina) < 1000:
+            break
+        inicio += 1000
+    return filas
+
+
+def competencia_por_cotizacion(desde, hasta) -> list[dict]:
+    return _leer_periodo("v_competencia_por_cotizacion", desde, hasta, ["fecha", "id_cotizacion"])
+
+
+def competencia_detalle(desde, hasta) -> list[dict]:
+    return _leer_periodo("v_competencia_detalle", desde, hasta,
+                         ["fecha", "id_cotizacion", "n_faltantes", "monto_competidora"])

@@ -132,8 +132,11 @@ def cotizar_en_sedes(lineas: list[dict], sedes: list[dict],
         disponibles = por_sede.get(sede["id_sede"], {})
         detalle, faltantes, total = [], [], 0.0
         confirmaciones = []
+        # Subtotal de cada línea de la canasta, por su posición: permite
+        # comparar dos ferreterías solo en los productos que ambas tienen.
+        por_linea = {}
 
-        for linea in lineas:
+        for indice, linea in enumerate(lineas):
             opciones = [
                 disponibles[sku]
                 for sku in linea["skus_posibles"]
@@ -149,6 +152,7 @@ def cotizar_en_sedes(lineas: list[dict], sedes: list[dict],
             precio = linea.get("precio_manual") or elegido["precio"]
             subtotal = round(precio * linea["cantidad"], 2)
             total += subtotal
+            por_linea[indice] = subtotal
 
             detalle.append({
                 "id_sku": elegido["id_sku"],
@@ -176,6 +180,7 @@ def cotizar_en_sedes(lineas: list[dict], sedes: list[dict],
             "canasta_completa": len(faltantes) == 0,
             "monto": round(total, 2),
             "detalle": detalle,
+            "por_linea": por_linea,
             # Antigüedad del precio MÁS VIEJO de los que se usaron: basta uno
             # desactualizado para que la cotización sea poco confiable.
             "dias_precio": max((_dias_desde(f) for f in confirmaciones), default=None),

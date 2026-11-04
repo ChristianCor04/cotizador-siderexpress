@@ -530,3 +530,12 @@ Al identificar al cliente aparece su historial completo, con todos los
 asesores, en totales y fechas (`ficha_cliente`): negociaciones, compras, monto
 comprado, ticket promedio, última compra y con qué ferretería, última
 cotización y el motivo de su última pérdida.
+
+## Competencia por cotización
+
+Cada ferretería evaluada guarda su costo por línea, también las incompletas.
+`v_competencia_detalle` compara cada una con la elegida **solo en los productos
+que tienen las dos**; `v_competencia_por_cotizacion` resume por cotización: si
+se eligió la más barata con todo y cuáles eran más baratas con 1 o 2 faltantes.
+Una diferencia negativa significa que la competidora era más barata. Se
+descarga en Seguimiento con «Preparar competencia», por periodo.

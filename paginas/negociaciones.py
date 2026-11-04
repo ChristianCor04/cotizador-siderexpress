@@ -279,47 +279,84 @@ def _empezar_nueva():
     st.rerun()
 
 
-def _buscar(texto):
-    """Busca por ticket, número de cotización o teléfono, en ese orden.
+ESTADOS_TEXTO = {"abierta": "abierta", "por_cerrar": "por cerrar",
+                 "ganada": "ganada", "perdida": "perdida"}
 
-    Un mismo texto puede ser varias cosas (un ticket numérico se parece a un
-    número de cotización), así que se prueban las tres y se muestran todas
-    las coincidencias.
+
+def _buscar(texto):
+    """Busca por ID CRM, número de cotización, teléfono, Person ID, documento
+    o nombre del cliente, y muestra primero las negociaciones que encuentra.
+
+    Si encuentra un cliente, trae también sus negociaciones: las abiertas
+    arriba y después las cerradas, de la más reciente a la más antigua.
     """
     texto = texto.strip()
-    encontradas = {}          # id_negociacion -> cómo se encontró
+    motivo = {}          # id_negociacion -> cómo se encontró
 
     for fila in db.buscar_por_ticket(texto):
-        encontradas.setdefault(fila["id_negociacion"], f"ID CRM {texto}")
+        motivo.setdefault(fila["id_negociacion"], f"ID CRM {texto}")
 
     if texto.isdigit() and len(texto) <= 7:
         cotizacion = db.buscar_por_codigo_cotizacion(int(texto))
         if cotizacion:
-            encontradas.setdefault(
-                cotizacion["id_negociacion"],
-                f"cotización {config.codigo_cotizacion(int(texto))}")
+            motivo.setdefault(cotizacion["id_negociacion"],
+                              f"cotización {config.codigo_cotizacion(int(texto))}")
 
-    clientes = db.buscar_clientes(texto)
-    cliente = clientes[0] if clientes else None
+    clientes = db.buscar_clientes(texto)[:5]
+    por_cliente = {c["id_cliente"]: c for c in clientes}
+    negociaciones = {n["id_negociacion"]: n for n in db.negociaciones_resumen(list(motivo))}
+    for n in db.negociaciones_de_clientes(list(por_cliente)):
+        negociaciones.setdefault(n["id_negociacion"], n)
+        motivo.setdefault(n["id_negociacion"], f"por {por_cliente[n['id_cliente']]['coincide_por']}")
 
-    if not encontradas and not cliente:
+    if not negociaciones and not clientes:
         st.warning("Sin resultados. Usa ＋ para crear una negociación nueva.")
         return
 
-    for id_negociacion, motivo in encontradas.items():
-        codigo = config.codigo_negociacion(id_negociacion)
-        if st.button(f"Abrir {codigo} · {motivo}", key=f"buscar_abrir_{id_negociacion}",
-                     width="stretch"):
-            neg = db.negociacion_por_id(id_negociacion)
+    # Las abiertas primero; dentro de cada grupo, la más reciente
+    ordenadas = sorted(negociaciones.values(),
+                       key=lambda n: (n["estado"] not in ("abierta", "por_cerrar"),
+                                      -(_marca_tiempo(n.get("fecha_inicio")))))
+    for n in ordenadas[:8]:
+        cliente = (n.get("m_clientes") or {}).get("nombre") or "Sin nombre"
+        estado = ESTADOS_TEXTO.get(n["estado"], n["estado"])
+        etiqueta = (f"{config.codigo_negociacion(n['id_negociacion'])} · {cliente} · {estado}"
+                    f" · {motivo.get(n['id_negociacion'], '')}")
+        tipo = "primary" if n["estado"] in ("abierta", "por_cerrar") else "secondary"
+        if st.button(etiqueta, key=f"buscar_abrir_{n['id_negociacion']}", width="stretch", type=tipo):
+            neg = db.negociacion_por_id(n["id_negociacion"])
             if neg:
                 _abrir_negociacion(neg)
             else:
                 st.error("No tienes acceso a esa negociación.")
+    if len(ordenadas) > 8:
+        st.caption(f"… y {len(ordenadas) - 8} más. Escribe algo más preciso para acotar.")
 
-    for c in clientes[:5]:
-        st.info(f"Cliente registrado: **{c.get('nombre') or 'sin nombre'}** · por {c['coincide_por']}"
-                + ("" if c.get("telefono") else " · teléfono pendiente")
-                + ". Si no ves su negociación en la lista, crea una nueva con ＋.")
+    # Clientes encontrados cuyas negociaciones no ves: avisa si tienen una
+    # abierta con otro asesor, para no duplicarla
+    con_negociacion = {n.get("id_cliente") for n in negociaciones.values()}
+    for c in clientes:
+        if c["id_cliente"] in con_negociacion:
+            continue
+        ficha = db.ficha_cliente(c["id_cliente"]) or {}
+        nombre = c.get("nombre") or "sin nombre"
+        if ficha.get("abierta_id"):
+            st.info(f"**{nombre}** tiene la negociación "
+                    f"{config.codigo_negociacion(ficha['abierta_id'])} abierta con "
+                    f"{ficha.get('abierta_asesor') or 'otro asesor'}. Coordina con él antes de continuar.")
+        else:
+            st.info(f"Cliente registrado: **{nombre}** · por {c['coincide_por']}"
+                    + ("" if c.get("telefono") else " · teléfono pendiente")
+                    + ". No tiene negociaciones abiertas: crea una con ＋.")
+
+
+def _marca_tiempo(fecha) -> float:
+    """Para ordenar por fecha sin importar el formato en que llega."""
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(str(fecha).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return 0.0
 
 
 # ---------------------------------------------------------------- columna 2
@@ -1689,6 +1726,12 @@ def _guardar_y_generar_pdf(usuario, elegida, promociones, descuento, total, devo
         "elegida": r["id_sede"] == elegida["id_sede"],
         # Se guarda para medir cuántas cotizaciones salen con precios viejos
         "dias_precio": r.get("dias_precio"),
+        # Para comparar después contra la elegida, también las incompletas:
+        # cuánto costaba lo que sí tenía, qué le faltó y el costo por línea
+        "monto_disponible": r["monto"],
+        "n_faltantes": r["n_faltantes"],
+        "faltantes": r.get("faltantes") or [],
+        "lineas": [{"i": i, "s": v} for i, v in sorted((r.get("por_linea") or {}).items())],
     } for i, r in enumerate(st.session_state.resultados)]
 
     # Se guardan las aplicadas y las omitidas: la comparación entre lo que se
