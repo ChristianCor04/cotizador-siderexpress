@@ -200,6 +200,8 @@ def _tarjeta_negociacion(neg, estado=None):
     with st.container(border=True, key=f"neg_{neg['id_negociacion']}"):
         st.caption(config.codigo_negociacion(neg["id_negociacion"]))
         st.markdown(f"**{cliente.get('nombre') or 'Sin nombre'}**")
+        if not cliente.get("telefono"):
+            st.caption(":orange[Teléfono pendiente]")
         texto = _texto_semaforo(estado or {})
         if texto:
             st.caption(texto)
@@ -297,7 +299,8 @@ def _buscar(texto):
                 cotizacion["id_negociacion"],
                 f"cotización {config.codigo_cotizacion(int(texto))}")
 
-    cliente = db.buscar_cliente_por_telefono(texto)
+    clientes = db.buscar_clientes(texto)
+    cliente = clientes[0] if clientes else None
 
     if not encontradas and not cliente:
         st.warning("Sin resultados. Usa ＋ para crear una negociación nueva.")
@@ -313,9 +316,10 @@ def _buscar(texto):
             else:
                 st.error("No tienes acceso a esa negociación.")
 
-    if cliente:
-        st.info(f"Cliente registrado: **{cliente.get('nombre') or 'sin nombre'}**. "
-                "Si no ves su negociación en la lista, crea una nueva con ＋.")
+    for c in clientes[:5]:
+        st.info(f"Cliente registrado: **{c.get('nombre') or 'sin nombre'}** · por {c['coincide_por']}"
+                + ("" if c.get("telefono") else " · teléfono pendiente")
+                + ". Si no ves su negociación en la lista, crea una nueva con ＋.")
 
 
 # ---------------------------------------------------------------- columna 2
@@ -391,14 +395,34 @@ def _bloque_ticket():
 
 
 def _datos_cliente(usuario):
+    mensaje = st.session_state.pop("mensaje_cliente", None)
+    if mensaje:
+        st.success(mensaje)
     cliente = st.session_state.cliente
 
     if cliente is None:
         _aviso_negociacion_abierta()
-        st.markdown("##### Cliente nuevo")
-        telefono = st.text_input("Teléfono", placeholder="+51987654321", key="tel_nuevo")
+        st.markdown("##### Cliente")
+        col_tel, col_pid = st.columns(2)
+        telefono = col_tel.text_input("Teléfono", placeholder="+51987654321", key="tel_nuevo")
+        person_id = col_pid.text_input(
+            "Person ID del CRM", placeholder="3213964170385", key="pid_nuevo",
+            help="Úsalo cuando el cliente llega de Meta sin teléfono. Permite "
+                 "reconocerlo después, hasta que pase su número.")
         if st.button("Buscar cliente", key="btn_buscar_cliente"):
-            encontrado = db.buscar_cliente_por_telefono(telefono.strip())
+            telefono, person_id = telefono.strip(), "".join(c for c in person_id if c.isdigit())
+            error = _validar_identificacion(telefono, person_id)
+            if error:
+                st.warning(error)
+                return
+            encontrado = None
+            for texto, por in ((telefono, "teléfono"), (person_id, "Person ID")):
+                if not texto:
+                    continue
+                coincidencias = [c for c in db.buscar_clientes(texto) if c["coincide_por"] == por]
+                if coincidencias:
+                    encontrado = db.cliente_por_id(coincidencias[0]["id_cliente"])
+                    break
             if encontrado:
                 # Antes de adoptarlo, se revisa que no tenga otra negociación
                 # viva: la base lo impide y es mejor avisar aquí.
@@ -411,8 +435,8 @@ def _datos_cliente(usuario):
                     st.session_state.cliente = encontrado
                 st.rerun()
             else:
-                st.info("Cliente nuevo. Completa sus datos abajo.")
-                st.session_state.cliente = {"telefono": telefono.strip(), "nombre": ""}
+                st.session_state.cliente = {"telefono": telefono or None,
+                                            "person_id_crm": person_id or None, "nombre": ""}
                 st.rerun()
         return
 
@@ -420,12 +444,20 @@ def _datos_cliente(usuario):
     col_nombre, col_cerrar = st.columns([3, 1], vertical_alignment="center")
     col_nombre.markdown(f"##### {cliente.get('nombre') or 'Cliente nuevo'}")
 
-    detalle = [cliente.get("telefono", ""),
+    detalle = [cliente.get("telefono") or ":orange[Teléfono pendiente]",
                f"{tipo.get('segmento','')} {tipo.get('nombre','')}".strip()]
+    if cliente.get("person_id_crm"):
+        detalle.append(f"Person ID {cliente['person_id_crm']}")
     documento = _documento_texto(cliente)
     if documento:
         detalle.append(documento)
     col_nombre.caption(" · ".join(d for d in detalle if d))
+    if not cliente.get("telefono"):
+        st.caption(":orange[Se puede cotizar sin teléfono, pero no registrar la venta. "
+                   "Pídelo al cliente y actualízalo en «Editar datos del cliente».]")
+
+    if cliente.get("id_cliente"):
+        _ficha_cliente(cliente["id_cliente"])
 
     with col_cerrar:
         _boton_cerrar_negociacion()
@@ -459,6 +491,13 @@ def _datos_cliente(usuario):
         )
         st.caption("El documento no es obligatorio para cotizar, pero sale en el PDF.")
 
+        col_t, col_p = st.columns(2)
+        telefono_nuevo = col_t.text_input("Teléfono", value=cliente.get("telefono") or "",
+                                          placeholder="Pendiente", key="tel_editar")
+        person_nuevo = col_p.text_input("Person ID del CRM", value=cliente.get("person_id_crm") or "",
+                                        placeholder="Opcional", key="pid_editar")
+        union_confirmada = _aviso_union(cliente, telefono_nuevo)
+
         if st.button("Guardar cliente"):
             error = _validar_documento(tipo_documento, numero_documento)
             if error:
@@ -473,20 +512,118 @@ def _datos_cliente(usuario):
             # un documento cargado por error.
             datos["tipo_documento"] = tipo_documento or None
             datos["numero_documento"] = numero_documento.strip() or None
+            telefono_nuevo = telefono_nuevo.strip()
+            person_nuevo = "".join(c for c in person_nuevo if c.isdigit())
+            error = _validar_identificacion(telefono_nuevo, person_nuevo)
+            if error:
+                st.error(error)
+                return
+            if union_confirmada is False:
+                st.warning("Confirma la unión de los clientes para guardar ese teléfono.")
+                return
+            datos["person_id_crm"] = person_nuevo or None
 
             try:
                 if cliente.get("id_cliente"):
-                    st.session_state.cliente = db.actualizar_cliente(
-                        cliente["id_cliente"], datos)
+                    actualizado = db.actualizar_cliente(cliente["id_cliente"], datos)
+                    mensaje = "Guardado."
+                    # El teléfono va aparte: si ya es de otro cliente, la base
+                    # une los dos y la negociación pasa al que ya existía.
+                    if telefono_nuevo and telefono_nuevo != (cliente.get("telefono") or ""):
+                        r = db.cambiar_telefono_cliente(cliente["id_cliente"], telefono_nuevo)
+                        if r.get("accion") == "unido":
+                            mensaje = (f"Teléfono guardado. Era de {r.get('nombre') or 'otro cliente'}: "
+                                       "se unieron los dos clientes con todo su historial.")
+                        actualizado = db.cliente_por_id(r["id_cliente"])
+                        if st.session_state.negociacion:
+                            st.session_state.negociacion = db.negociacion_por_id(
+                                st.session_state.negociacion["id_negociacion"])
+                    st.session_state.cliente = db.cliente_por_id(actualizado["id_cliente"])
                 else:
-                    datos["telefono"] = cliente["telefono"]
+                    datos["telefono"] = telefono_nuevo or None
                     st.session_state.cliente = db.crear_cliente(datos)
+                    mensaje = "Guardado."
             except Exception as e:
                 st.error(_error_cliente(e))
                 return
 
-            st.success("Guardado.")
+            st.session_state.mensaje_cliente = mensaje
             st.rerun()
+
+
+def _validar_identificacion(telefono: str, person_id: str) -> str | None:
+    """El cliente necesita teléfono o Person ID del CRM."""
+    digitos = "".join(c for c in (telefono or "") if c.isdigit())
+    if not digitos and not person_id:
+        return "Escribe el teléfono o, si el cliente no lo dio, su Person ID del CRM."
+    if digitos and not 8 <= len(digitos) <= 11:
+        return "El teléfono debe tener 9 dígitos, con o sin el 51 adelante."
+    if person_id and not 6 <= len(person_id) <= 20:
+        return "El Person ID debe tener solo números, como 3213964170385."
+    return None
+
+
+def _aviso_union(cliente, telefono_nuevo) -> bool | None:
+    """Si el teléfono nuevo ya es de otro cliente, pide confirmar la unión.
+
+    Devuelve None si no hay unión, True si el asesor la confirmó y False si
+    falta confirmarla.
+    """
+    telefono_nuevo = (telefono_nuevo or "").strip()
+    if not cliente.get("id_cliente") or not telefono_nuevo \
+            or telefono_nuevo == (cliente.get("telefono") or ""):
+        return None
+    otros = [c for c in db.buscar_clientes(telefono_nuevo)
+             if c["coincide_por"] == "teléfono" and c["id_cliente"] != cliente["id_cliente"]]
+    if not otros:
+        return None
+    otro = otros[0]
+    ficha = db.ficha_cliente(otro["id_cliente"])
+    st.warning(f"Ese teléfono ya es de **{otro['nombre'] or 'otro cliente'}**, con "
+               f"{ficha.get('negociaciones', 0)} negociación(es) y {ficha.get('compras', 0)} "
+               "compra(s). Al guardar se unen los dos clientes: esta negociación pasa a "
+               "ese cliente y se conserva todo el historial.")
+    return st.checkbox("Es la misma persona: unir los clientes", key="confirmar_union")
+
+
+def _ficha_cliente(id_cliente: int):
+    """Historial completo del cliente, con todos los asesores.
+
+    Abierta al crear una negociación, para saber de entrada si es un cliente
+    nuevo o recurrente.
+    """
+    try:
+        f = db.ficha_cliente(id_cliente)
+    except Exception:
+        return
+    if not f or not f.get("negociaciones"):
+        st.caption("Cliente nuevo: es su primera negociación.")
+        return
+
+    abierta = st.session_state.negociacion is None
+    with st.expander("Historial del cliente", expanded=abierta):
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Negociaciones", f["negociaciones"],
+                  help=f"{f['ganadas']} ganadas · {f['perdidas']} perdidas · {f['abiertas']} abiertas")
+        c2.metric("Compras", f["compras"],
+                  help=(f"{f['compras_por_confirmar']} por confirmar" if f.get("compras_por_confirmar") else None))
+        c3.metric("Monto comprado", config.soles(f.get("monto_comprado") or 0))
+        c4.metric("Cotizaciones", f["cotizaciones"])
+
+        lineas = []
+        if f.get("ultima_compra"):
+            lineas.append(f"Última compra: {config.fecha_hora(f['ultima_compra'])[:10]}"
+                          + (f" con {f['ferreteria_ultima_compra']}" if f.get("ferreteria_ultima_compra") else ""))
+        if f.get("ticket_promedio"):
+            lineas.append(f"Ticket promedio: {config.soles(f['ticket_promedio'])}")
+        if f.get("ultima_cotizacion"):
+            lineas.append(f"Última cotización: {config.fecha_hora(f['ultima_cotizacion'])[:10]}")
+        if f.get("cliente_desde"):
+            lineas.append(f"Cliente desde: {config.fecha_hora(f['cliente_desde'])[:10]}")
+        if lineas:
+            st.caption(" · ".join(lineas))
+        if f.get("motivo_ultima_perdida"):
+            st.caption(f"Última negociación perdida: {f['motivo_ultima_perdida']}")
 
 
 def _documento_texto(cliente) -> str:
@@ -529,6 +666,12 @@ def _error_cliente(e) -> str:
         return "El RUC debe tener 11 dígitos."
     if "uq_cliente_telefono" in detalle:
         return "Ese teléfono ya está registrado en otro cliente."
+    if "uq_cliente_person_id" in detalle:
+        return "Ese Person ID ya está registrado en otro cliente."
+    if "chk_cliente_identificado" in detalle:
+        return "El cliente necesita teléfono o Person ID del CRM."
+    if "Cierra una de las dos" in detalle or "Solo puede cambiar el teléfono" in detalle:
+        return detalle.split("'message': '")[-1].split("'")[0] if "'message'" in detalle else detalle
     return f"No se pudo guardar: {e}"
 
 
@@ -1719,7 +1862,11 @@ def _bloque_venta(usuario):
         st.caption("Se copian los productos de la cotización. "
                    "Si compró menos, se ajusta después de registrarla.")
 
-        if st.button("Registrar venta", type="primary", width="stretch"):
+        sin_telefono = not (st.session_state.cliente or {}).get("telefono")
+        if sin_telefono:
+            st.warning("Registra el teléfono del cliente antes de la venta: sin él no se "
+                       "puede coordinar la entrega.")
+        if st.button("Registrar venta", type="primary", width="stretch", disabled=sin_telefono):
             if not pago:
                 st.warning("Indica cómo pagó el cliente.")
                 return

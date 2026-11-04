@@ -417,27 +417,6 @@ Las cotizaciones y ventas guardan el tipo de cambio del día, así que la
 columna TC del formato de cotizadores ya sale llena.
 
 
-## Ferreterías y sedes
-
-Pantalla Ferreterías, para supervisor y master. Lista, mapa y formularios.
-
-**Código de sede automático:** prefijo de la zona + siguiente número libre.
-Los prefijos viven en `m_zonas.prefijo_sede`: TRUJ, CIX, AQP, LIM, CUZ. El
-código no se edita porque es la llave de la plantilla de Excel.
-
-**Distrito automático:** sale de las coordenadas, también al editar una sede.
-
-**Permisos:** el supervisor crea ferreterías y crea o edita sedes solo en sus
-zonas. Abrir una zona nueva es del master: desde el formulario de sede, si las
-coordenadas caen en una provincia sin zona, aparece la opción de abrirla con
-su prefijo; la zona toma todos los distritos libres de esa provincia.
-
-**Nada se borra:** ferreterías y sedes se desactivan.
-
-**El mapa** usa el mapa base gratuito de Carto, sin cuenta de Google. Al
-hacer clic en un punto se selecciona su ferretería.
-
-
 ## Asignación por cobertura
 
 Reemplaza la búsqueda por radio, **zona por zona**: cada zona tiene un método
@@ -487,3 +466,67 @@ Se resuelve nombrando la llave en la consulta. Casos actuales:
 
 **Al crear una tabla nueva que una dos tablas existentes, buscar en `db.py` las
 consultas que traen una dentro de la otra y nombrar la llave.**
+
+
+## Ferreterías y sedes
+
+Pantalla Ferreterías, para supervisor y master, en tres pasos:
+
+1. **Ferretería**: elegir una o crear otra. Aviso si el nombre se parece a otra o
+   si el RUC se repite.
+2. **Sedes**: lista de sus sedes; clic en una para editarla, o «Nueva sede».
+   El código se genera solo (prefijo de la zona + siguiente número) y el distrito
+   sale de las coordenadas. Si caen en una provincia sin zona, el master puede
+   abrirla ahí mismo.
+3. **Cobertura**: los distritos de la sede con su nivel, que se cambia en la
+   misma tabla; agregar varios distritos de una vez o quitarlos. El distrito
+   propio de la sede siempre es principal.
+
+El supervisor solo crea y edita sedes y cobertura en sus zonas. Nada se borra:
+ferreterías y sedes se desactivan.
+
+El método de cada zona (radio o cobertura) y los distritos sin ferretería
+principal están al final de **Seguimiento**.
+
+## Cierre por inactividad
+
+Todas las noches, a las 00:20 de Lima, la base cierra como perdidas las
+negociaciones abiertas que llevan 7 días o más sin cotizar, con el motivo
+«Cierre por inactividad». Nunca cierra una con venta registrada. Lo ejecuta
+`cerrar_negociaciones_inactivas()` desde pg_cron; los usuarios de la app no
+pueden ejecutarla. Para cambiar los días, reprogramar el job con otro número.
+
+
+## Monto referencial de la canasta
+
+Decide el tramo y, con él, el alcance de búsqueda. Cada línea se valora con el
+precio promedio de mercado de sus SKU (`v_precios_referencia_sku`): producto,
+unidad y marca si se eligió. Antes se usaba el promedio por producto, que
+mezclaba varilla y tonelada y valoraba el fierro muy por encima de lo real.
+
+## Sedes ya cotizadas
+
+Al recotizar una negociación, las sedes con las que ya se cotizó aparecen
+siempre, primero y marcadas, aunque estén fuera del alcance o tengan faltantes.
+Así el cliente puede modificar su pedido con la misma ferretería.
+
+
+## Clientes sin teléfono
+
+Un cliente se puede registrar con teléfono o con el **Person ID del CRM**
+(por ejemplo 3213964170385), cuando llega de Meta sin número. Se busca por
+cualquiera de los dos, y también por documento o nombre. Se puede cotizar sin
+teléfono, pero **no registrar la venta**.
+
+**Cambiar el teléfono:** en «Editar datos del cliente». Si el número ya es de
+otro cliente, la pantalla avisa y pide confirmar; al guardar, la base une los
+dos en el que ya existía (`cambiar_telefono_cliente`): las negociaciones pasan
+a él y se completan sus datos. Si los dos tienen una negociación abierta, pide
+cerrar una antes. Cada cambio y cada unión quedan en `h_clientes_identidad`.
+
+## Ficha del cliente
+
+Al identificar al cliente aparece su historial completo, con todos los
+asesores, en totales y fechas (`ficha_cliente`): negociaciones, compras, monto
+comprado, ticket promedio, última compra y con qué ferretería, última
+cotización y el motivo de su última pérdida.

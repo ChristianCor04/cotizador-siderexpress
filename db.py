@@ -333,6 +333,34 @@ def buscar_cliente_por_telefono(telefono: str) -> dict | None:
     return cliente
 
 
+def buscar_clientes(texto: str) -> list[dict]:
+    """Por teléfono, Person ID del CRM, documento o nombre."""
+    if not (texto or "").strip():
+        return []
+    return conectar().rpc("buscar_clientes", {"p_texto": texto.strip()}).execute().data or []
+
+
+def cliente_por_id(id_cliente: int) -> dict | None:
+    filas = conectar().table("m_clientes").select("*, m_tipos_cliente(segmento, nombre)") \
+        .eq("id_cliente", id_cliente).execute().data
+    return filas[0] if filas else None
+
+
+def cambiar_telefono_cliente(id_cliente: int, telefono: str) -> dict:
+    """Cambia el teléfono. Si ya es de otro cliente, la base une los dos.
+
+    Devuelve {accion: actualizado | unido | sin_cambios, id_cliente, ...}.
+    """
+    return conectar().rpc("cambiar_telefono_cliente", {
+        "p_id_cliente": id_cliente, "p_telefono": telefono,
+    }).execute().data
+
+
+def ficha_cliente(id_cliente: int) -> dict:
+    """Historial completo del cliente, con todos los asesores, en totales."""
+    return conectar().rpc("ficha_cliente", {"p_id_cliente": id_cliente}).execute().data or {}
+
+
 def crear_cliente(datos: dict) -> dict:
     return conectar().table("m_clientes").insert(datos).execute().data[0]
 
