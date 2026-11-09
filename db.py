@@ -1116,3 +1116,24 @@ def competencia_por_cotizacion(desde, hasta) -> list[dict]:
 def competencia_detalle(desde, hasta) -> list[dict]:
     return _leer_periodo("v_competencia_detalle", desde, hasta,
                          ["fecha", "id_cotizacion", "n_faltantes", "monto_competidora"])
+
+
+def ubicacion_de_distrito(id_distrito: int | None) -> dict:
+    """Nombre del distrito, su provincia y departamento, para el PDF."""
+    if not id_distrito:
+        return {}
+    filas = conectar().table("m_distritos") \
+        .select("nombre, m_provincias(nombre, m_departamentos(nombre))") \
+        .eq("id_distrito", id_distrito).execute().data
+    if not filas:
+        return {}
+    prov = filas[0].get("m_provincias") or {}
+    return {"distrito": (filas[0]["nombre"] or "").replace("_", " ").title(),
+            "provincia": (prov.get("nombre") or "").replace("_", " ").title(),
+            "departamento": ((prov.get("m_departamentos") or {}).get("nombre") or "").title()}
+
+
+def ruc_de_sede(id_sede: int) -> str | None:
+    filas = conectar().table("m_sedes").select("m_ferreterias(ruc)") \
+        .eq("id_sede", id_sede).execute().data
+    return ((filas[0].get("m_ferreterias") or {}).get("ruc")) if filas else None

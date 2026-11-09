@@ -47,6 +47,9 @@ VALORES_INICIALES = {
     # Cuando el cliente no pasa ubicación exacta, se elige a mano
     "id_distrito": None,
     "id_provincia": None,
+    # Sube al cambiar de negociación: los selectores de ubicación se crean de
+    # nuevo y toman el distrito de la negociación abierta, no el anterior
+    "version_ubicacion": 0,
     # Ticket del CRM de la conversación actual con el cliente
     "ticket_actual": None,
     # Negociación viva que impide crear otra para el mismo cliente
@@ -225,6 +228,7 @@ def _tarjeta_negociacion(neg, estado=None):
 
 
 def _abrir_negociacion(neg):
+    _reiniciar_ubicacion()
     st.session_state.negociacion = neg
     st.session_state.cliente = neg.get("m_clientes")
     st.session_state.modo_nuevo = False
@@ -263,7 +267,22 @@ def _abrir_negociacion(neg):
     st.rerun()
 
 
+def _reiniciar_ubicacion():
+    """Olvida la ubicación de la negociación anterior.
+
+    Streamlit conserva lo elegido en un selector aunque cambie la
+    negociación. Sin esto, al abrir otra negociación los selectores seguían
+    con el distrito anterior y lo volvían a guardar, y las coordenadas de la
+    anterior quedaban en el campo.
+    """
+    st.session_state.ubicacion_texto = ""
+    st.session_state.id_distrito = None
+    st.session_state.id_provincia = None
+    st.session_state.version_ubicacion = st.session_state.get("version_ubicacion", 0) + 1
+
+
 def _empezar_nueva():
+    _reiniciar_ubicacion()
     st.session_state.negociacion = None
     st.session_state.cliente = None
     st.session_state.materiales = []
@@ -764,6 +783,7 @@ def _ubicacion():
     texto = st.text_input(
         "Link de Google Maps o coordenadas",
         value=st.session_state.ubicacion_texto,
+        key=f"ubicacion_{st.session_state.version_ubicacion}",
         placeholder="https://www.google.com/maps/... o -8.0470, -79.0499",
         label_visibility="collapsed",
     )
@@ -821,7 +841,7 @@ def _selectores_geografia():
     indice_dep = (departamentos.index(guardado["departamento"])
                   if guardado and guardado["departamento"] in departamentos else None)
     departamento = st.selectbox("Departamento", departamentos, index=indice_dep,
-                                placeholder="Selecciona", key="sel_departamento")
+                                placeholder="Selecciona", key=f"sel_departamento_{st.session_state.version_ubicacion}")
 
     # Provincia: solo las de ese departamento
     provincias = sorted({d["provincia"] for d in distritos
@@ -830,7 +850,7 @@ def _selectores_geografia():
                    if guardado and guardado["provincia"] in provincias else None)
     provincia = st.selectbox("Provincia", provincias, index=indice_prov,
                              placeholder="Selecciona", disabled=not departamento,
-                             key="sel_provincia")
+                             key=f"sel_provincia_{st.session_state.version_ubicacion}")
 
     # Distrito: solo los de esa provincia
     opciones = [d for d in distritos if d["provincia"] == provincia
@@ -840,7 +860,7 @@ def _selectores_geografia():
                    if guardado and guardado["distrito"].replace("_", " ") in nombres else None)
     distrito = st.selectbox("Distrito", nombres, index=indice_dist,
                             placeholder="Selecciona", disabled=not provincia,
-                            key="sel_distrito")
+                            key=f"sel_distrito_{st.session_state.version_ubicacion}")
 
     # Guardar la elección
     nuevo_id = opciones[nombres.index(distrito)]["id_distrito"] if distrito else None
@@ -1799,7 +1819,11 @@ def _guardar_y_generar_pdf(usuario, elegida, promociones, descuento, total, devo
             "codigo": config.codigo_cotizacion(id_cotizacion),
             "fecha": config.fecha_hora((guardada or {}).get("fecha")),
             "vence": config.vence_texto((guardada or {}).get("fecha_vencimiento")),
+            "id_crm": ticket,
         },
+        # El distrito de la obra, el de esta cotización: no el de la ferretería
+        "obra": db.ubicacion_de_distrito(
+            (guardada or {}).get("id_distrito") or st.session_state.id_distrito),
         "cliente": {
             "nombre": cliente.get("nombre"),
             "telefono": cliente.get("telefono"),
@@ -1808,7 +1832,7 @@ def _guardar_y_generar_pdf(usuario, elegida, promociones, descuento, total, devo
         "ferreteria": {
             "nombre": elegida["ferreteria"],
             "sede": elegida["sede"],
-            "distrito": elegida.get("distrito"),
+            "ruc": db.ruc_de_sede(elegida["id_sede"]),
         },
         # La marca sale del SKU que la lógica eligió, no de lo que escribió el
         # asesor: si dejó la marca vacía, el cliente igual debe saber cuál es.

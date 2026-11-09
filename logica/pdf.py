@@ -114,13 +114,17 @@ def generar_pdf(datos: dict) -> bytes:
 
     # ------------------------------------------------ datos de la cotización
     cot, cli, fer = datos["cotizacion"], datos["cliente"], datos["ferreteria"]
+    obra = datos.get("obra") or {}
+    lugar_obra = " · ".join(x for x in [obra.get("distrito"), obra.get("provincia")] if x)
     encabezado = [
-        [Paragraph(f"<b>N° {escape(cot['codigo'])}</b>", normal),
+        [Paragraph(f"<b>N° {escape(cot['codigo'])}</b>"
+                   + (f"<br/>ID CRM: {escape(str(cot['id_crm']))}" if cot.get("id_crm") else ""), normal),
          Paragraph(f"<b>Cliente</b><br/>{escape(cli['nombre'] or '—')}", normal)],
         [Paragraph(f"Fecha: {escape(cot['fecha'])}<br/>"
                    f"Válida hasta: {escape(_vence_legible(cot['vence']))}", normal),
-         Paragraph(f"{escape(cli.get('telefono') or '')}<br/>"
-                   f"{escape(cli.get('documento') or '')}", normal)],
+         Paragraph("<br/>".join(escape(x) for x in [
+                       cli.get("telefono") or "", cli.get("documento") or "",
+                       f"Obra en {lugar_obra}" if lugar_obra else ""] if x), normal)],
     ]
     tabla_enc = Table(encabezado, colWidths=[85 * mm, 85 * mm])
     tabla_enc.setStyle(TableStyle([
@@ -130,10 +134,13 @@ def generar_pdf(datos: dict) -> bytes:
     partes += [tabla_enc, Spacer(1, 8)]
 
     # ------------------------------------------------------------- ferretería
-    direccion = " · ".join(x for x in [fer.get("sede"), fer.get("distrito")] if x)
+    # Va el RUC de la ferretería: es a quien el cliente le paga. El distrito
+    # que importa es el de la obra, que va arriba junto al cliente.
+    detalle = " · ".join(x for x in [fer.get("sede"),
+                                     f"RUC {fer['ruc']}" if fer.get("ruc") else None] if x)
     partes.append(Paragraph(
         f"<b>Ferretería:</b> {escape(fer['nombre'])}"
-        + (f"<br/>{escape(direccion)}" if direccion else ""), normal))
+        + (f"<br/>{escape(detalle)}" if detalle else ""), normal))
     partes.append(Spacer(1, 10))
 
     # ---------------------------------------------------------------- productos
