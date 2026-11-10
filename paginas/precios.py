@@ -456,21 +456,38 @@ def _tabla_precios(nombre, sedes, catalogo, precios):
     )
 
     cambios = _detectar_cambios(tabla, editada, sedes, unico)
+    bajas, productos_baja = _detectar_bajas(tabla, editada, sedes, unico)
+
+    if bajas:
+        st.warning(f"Se quitarán {len(bajas)} precio(s): la ferretería dejará de "
+                   f"ofrecer {', '.join(productos_baja[:6])}"
+                   + (f" y {len(productos_baja) - 6} más" if len(productos_baja) > 6 else "")
+                   + ". Si fue sin querer, vuelve a escribir el precio antes de guardar.")
 
     col_info, col_botones = st.columns([2, 1])
-    col_info.caption(f"{len(cambios)} precio(s) modificado(s) sin guardar"
-                     if cambios else "Sin cambios pendientes")
+    resumen = []
+    if cambios:
+        resumen.append(f"{len(cambios)} modificado(s)")
+    if bajas:
+        resumen.append(f"{len(bajas)} a quitar")
+    col_info.caption(" · ".join(resumen) + " sin guardar" if resumen else "Sin cambios pendientes")
 
     with col_botones:
         if st.button("Guardar cambios", type="primary", width="stretch",
-                     disabled=not cambios):
+                     disabled=not (cambios or bajas)):
             try:
-                resultado = db.guardar_precios(cambios, modo="actualizar")
+                partes = []
+                if cambios:
+                    resultado = db.guardar_precios(cambios, modo="actualizar")
+                    partes.append(f"{resultado['actualizados']} actualizados, "
+                                  f"{resultado['nuevos']} nuevos")
+                if bajas:
+                    db.quitar_precios(bajas)
+                    partes.append(f"{len(bajas)} quitados")
                 db.limpiar_cache()
                 st.session_state.precios_tabla = None
                 st.session_state.precios_version += 1
-                st.success(f"Guardado: {resultado['actualizados']} actualizados, "
-                           f"{resultado['nuevos']} nuevos.")
+                st.session_state.mensaje_precios = "Guardado: " + ", ".join(partes) + "."
                 st.rerun()
             except Exception as e:
                 st.error(f"No se pudo guardar: {e}")
@@ -529,7 +546,7 @@ def _detectar_cambios(original, editada, sedes, unico=False) -> list[dict]:
             ahora = editada.iloc[i][columna]
 
             if pd.isna(ahora):
-                continue                      # vaciar no borra: se hace con reemplazar
+                continue                      # las celdas vaciadas las cuenta _detectar_bajas
             if pd.isna(antes) or round(float(antes), 4) != round(float(ahora), 4):
                 destinos = ([s["id_sede"] for s in sedes] if id_sede is None
                             else [id_sede])
@@ -543,6 +560,35 @@ def _detectar_cambios(original, editada, sedes, unico=False) -> list[dict]:
                         "fuente": "asesor",
                     })
     return cambios
+
+
+def _detectar_bajas(original, editada, sedes, unico=False) -> tuple[list[dict], list[str]]:
+    """Precios que el asesor vació en la tabla: la ferretería ya no los vende.
+
+    Devuelve los pares (sede, sku) a quitar y los nombres de los productos,
+    para el aviso. En modo único, vaciar el precio lo quita de todas las sedes.
+    Los precios calculados desde la tonelada no se quitan desde aquí.
+    """
+    columnas = ({COLUMNA_UNICA: None} if unico
+                else {s["codigo"]: s["id_sede"] for s in sedes})
+    calculados = st.session_state.get("precios_calculados") or set()
+    textos = [c for c in editada.columns
+              if c not in columnas and c != "id_sku"
+              and not pd.api.types.is_numeric_dtype(editada[c])]
+
+    bajas, nombres = [], []
+    for i in range(len(editada)):
+        id_sku = int(editada.iloc[i]["id_sku"])
+        for columna, id_sede in columnas.items():
+            if pd.isna(original.iloc[i][columna]) or not pd.isna(editada.iloc[i][columna]):
+                continue
+            destinos = [s["id_sede"] for s in sedes] if id_sede is None else [id_sede]
+            destinos = [d for d in destinos if (d, id_sku) not in calculados]
+            bajas += [{"id_sede": d, "id_sku": id_sku} for d in destinos]
+            nombre = " ".join(str(editada.iloc[i][c]) for c in textos[:3] if pd.notna(editada.iloc[i][c]))
+            if destinos and nombre and nombre not in nombres:
+                nombres.append(nombre)
+    return bajas, nombres
 
 
 # -------------------------------------------------------------------- Excel

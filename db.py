@@ -608,6 +608,20 @@ def guardar_precios(precios: list[dict], modo: str = "actualizar") -> dict:
     }).execute().data
 
 
+def quitar_precios(pares: list[dict]) -> None:
+    """Desactiva precios: la ferretería ya no vende ese SKU en esa sede.
+
+    No se borran: el historial de precios y las cotizaciones que los usaron
+    siguen apuntando a ellos.
+    """
+    por_sede = {}
+    for p in pares:
+        por_sede.setdefault(p["id_sede"], []).append(p["id_sku"])
+    for id_sede, skus in por_sede.items():
+        conectar().table("m_precios").update({"activo": False}) \
+            .eq("id_sede", id_sede).in_("id_sku", skus).execute()
+
+
 def sedes_de_ferreteria(id_ferreteria: int) -> list[dict]:
     return conectar().table("m_sedes") \
         .select("id_sede, codigo, nombre, m_distritos!fk_sede_distrito(nombre)") \
