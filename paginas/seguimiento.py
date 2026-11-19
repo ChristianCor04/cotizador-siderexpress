@@ -59,6 +59,7 @@ def mostrar(usuario: dict):
         _tabla_perdidas(perdidas)
 
     _tabla_ferreterias(ferreterias)
+    _remarketing(desde, hasta)
 
     col_resumen, col_formato, col_rangos, col_competencia = st.columns(4)
     with col_resumen:
@@ -590,3 +591,72 @@ def _excel_competencia(resumen, detalle) -> bytes:
                     for (celda,) in hoja.iter_rows(min_row=2, min_col=i, max_col=i):
                         celda.number_format = '"S/" #,##0.00'
     return buffer.getvalue()
+
+
+# ============================================================ remarketing ===
+COLUMNAS_TRACKER = {
+    "id_cot": "ID-COT", "cliente": "CLIENTE", "zona": "ZONA", "distrito": "DISTRITO",
+    "distribuidor": "DISTRIBUIDOR", "telefono": "TELEFONO", "ticket_de_compra": "Ticket de Compra",
+    "fecha_contacto": "FECHA_CONTACTO", "lote": "LOTE", "intento_n": "INTENTO_N", "canal": "CANAL",
+    "hora_inicio": "HORA_INICIO", "hora_fin": "HORA_FIN", "duracion": "DURACION",
+    "contactabilidad": "CONTACTABILIDAD", "resultado": "RESULTADO", "objecion": "OBJECION",
+    "prox_contacto": "PROX_CONTACTO", "campana": "CAMPAÑA", "observacion": "OBSERVACION",
+    "fuente": "FUENTE", "asesora": "ASESORA",
+}
+
+
+def _remarketing(desde, hasta):
+    """Cuatro indicadores de remarketing del periodo y la descarga en formato tracker."""
+    try:
+        r = db.rmkt_indicadores(desde, hasta)
+    except Exception:
+        return                      # sin el módulo instalado, la sección no aparece
+    if not r:
+        return
+
+    with st.container(border=True):
+        st.markdown("**Remarketing**")
+        gestiones, dias = r.get("gestiones") or 0, r.get("dias_con_gestion") or 0
+        gestionados = r.get("casos_gestionados") or 0
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Gestiones por día", f"{gestiones / dias:.1f}" if dias else "—",
+                  help=f"{gestiones} gestiones en {dias} día(s) con actividad")
+        c2.metric("Contactabilidad",
+                  f"{100 * (r.get('casos_contactados') or 0) / gestionados:.0f}%" if gestionados else "—",
+                  help="Casos con al menos un contacto efectivo ÷ casos gestionados en el periodo")
+        c3.metric("Ventas con contacto previo", r.get("ventas_con_contacto") or 0,
+                  help="Ventas registradas en negociaciones donde remarketing tuvo antes un "
+                       "resultado positivo (retornó al flujo, derivado o seguimiento interesado). "
+                       f"Monto: {config.soles(r.get('monto_ventas') or 0)}")
+        c4.metric("Casos abiertos hoy", r.get("en_bandeja") or 0)
+
+        col_r, col_o = st.columns(2)
+        resultados = r.get("resultados") or {}
+        if resultados:
+            col_r.dataframe(pd.DataFrame(sorted(resultados.items(), key=lambda x: -x[1]),
+                                         columns=["Resultado", "Gestiones"]),
+                            hide_index=True, width="stretch")
+        objeciones = r.get("objeciones") or {}
+        if objeciones:
+            col_o.dataframe(pd.DataFrame(sorted(objeciones.items(), key=lambda x: -x[1]),
+                                         columns=["Objeción", "Gestiones"]),
+                            hide_index=True, width="stretch")
+        if not gestiones:
+            st.caption("Sin gestiones de remarketing en el periodo.")
+            return
+
+        if st.session_state.get("rmkt_archivo") is None:
+            if st.button("Preparar gestiones de remarketing (formato tracker)"):
+                filas = db.rmkt_gestiones_periodo(desde, hasta)
+                tabla = pd.DataFrame(filas, columns=list(COLUMNAS_TRACKER)).rename(columns=COLUMNAS_TRACKER)
+                buffer = BytesIO()
+                tabla.to_excel(buffer, index=False, sheet_name="Gestiones")
+                st.session_state.rmkt_archivo = buffer.getvalue()
+                st.session_state.rmkt_filas = len(tabla)
+                st.rerun()
+        else:
+            st.download_button(
+                f"⬇ Gestiones de remarketing · {st.session_state.rmkt_filas:,} filas",
+                data=st.session_state.rmkt_archivo, file_name=f"remarketing_{desde}_{hasta}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                on_click=lambda: st.session_state.update(rmkt_archivo=None))

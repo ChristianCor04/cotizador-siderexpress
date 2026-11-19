@@ -394,7 +394,71 @@ def _bloque_cliente_y_materiales(usuario):
         _lista_materiales()
 
     if st.session_state.negociacion:
+        _panel_remarketing(st.session_state.negociacion)
         _bloque_venta(usuario)
+
+
+# ------------------------------------------------------------ remarketing
+ESTADO_RMKT = {"pendiente": "en la bandeja de remarketing", "programado": "programado",
+               "recuperado": "recuperado: el cliente está interesado", "cerrado": "cerrado"}
+
+
+def _panel_remarketing(negociacion):
+    """Estado del caso de remarketing de esta negociación y el botón Llamar.
+
+    El asesor no gestiona el caso: lo ve en solo lectura y, si necesita que
+    remarketing llame ya al cliente, lo pide con «Llamar».
+    """
+    id_neg = negociacion["id_negociacion"]
+    try:
+        caso = db.rmkt_caso_de_negociacion(id_neg)
+    except Exception:
+        return                      # sin el módulo instalado, el panel no aparece
+    if caso is None and not st.session_state.get("cotizacion_actual"):
+        return                      # sin cotización todavía no hay a quién llamar
+
+    with st.container(border=True):
+        col_txt, col_btn = st.columns([3, 1.2], vertical_alignment="center")
+        if caso:
+            texto = f"**Remarketing** · {ESTADO_RMKT.get(caso['estado'], caso['estado'])}"
+            if caso["estado"] == "programado" and caso.get("fecha_proximo_contacto"):
+                texto += f" para el {caso['fecha_proximo_contacto'][8:10]}/{caso['fecha_proximo_contacto'][5:7]}"
+            if caso["estado"] == "cerrado" and caso.get("motivo_cierre"):
+                texto += f" · {caso['motivo_cierre']}"
+            if caso.get("prioridad") == 1:
+                texto += " · :red[urgente]"
+            col_txt.markdown(texto)
+        else:
+            col_txt.markdown("**Remarketing** · sin caso")
+
+        abierto = caso is None or caso["estado"] != "cerrado" or caso.get("motivo_cierre") != "Convertido"
+        if abierto and negociacion.get("estado") != "ganada":
+            with col_btn.popover("📞 Llamar", width="stretch",
+                                 help="Pide a remarketing que llame ya a este cliente: "
+                                      "el caso pasa primero en su bandeja."):
+                nota = st.text_input("Nota para remarketing", max_chars=200,
+                                     placeholder="Ej. llamar después de las 4 p. m.",
+                                     key=f"rmkt_nota_{id_neg}")
+                if st.button("Enviar a remarketing", type="primary", key=f"rmkt_llamar_{id_neg}"):
+                    try:
+                        db.rmkt_solicitar_llamada(id_neg, nota)
+                        st.toast("Listo: remarketing lo tiene como urgente.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(getattr(e, "message", None) or str(e))
+
+        if caso:
+            gestiones = db.rmkt_gestiones(caso["id_caso"])
+            if gestiones:
+                with st.expander(f"Gestiones de remarketing ({len(gestiones)})"):
+                    for g in gestiones:
+                        partes = [config.fecha_hora(g["hora_fin"])[:16], g["canal"], g["contactabilidad"]]
+                        partes += [x for x in (g.get("resultado"), g.get("objecion")) if x]
+                        quien = (g.get("m_usuarios") or {}).get("nombre")
+                        linea = " · ".join(partes) + (f" · {quien}" if quien else "")
+                        if g.get("observacion"):
+                            linea += f" — {g['observacion']}"
+                        st.caption(linea)
 
 
 def _aviso_negociacion_abierta():

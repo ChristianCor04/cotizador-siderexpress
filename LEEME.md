@@ -539,3 +539,21 @@ que tienen las dos**; `v_competencia_por_cotizacion` resume por cotización: si
 se eligió la más barata con todo y cuáles eran más baratas con 1 o 2 faltantes.
 Una diferencia negativa significa que la competidora era más barata. Se
 descarga en Seguimiento con «Preparar competencia», por periodo.
+
+## Remarketing
+
+Pantalla de la asesora de remarketing (archivo 52). Digitaliza su tracker.
+
+- **Quién la ve:** supervisores y master, y quien tenga el módulo en
+  `m_usuarios.modulos`. La asesora tiene `{Remarketing}` y no ve Negociaciones.
+  Un asesor que cotiza y llama: `{Negociaciones,Precios,Remarketing}`.
+- **Casos:** la primera cotización de una negociación crea su caso; el botón
+  **Llamar** de Negociaciones lo sube a urgente; una venta lo cierra como
+  Convertido; la negociación cerrada sin venta lo cierra, salvo que esté
+  programado a futuro. Se asignan por zona (`rmkt_zonas`).
+- **Bandeja:** urgentes, luego programados para hoy o atrasados, luego monto ↓.
+- **Gestión:** contactabilidad → resultado → objeción o fecha según el caso.
+  Tres intentos seguidos sin contacto cierran el caso. Cada intento queda en
+  `rmkt_gestiones`; `v_rmkt_gestiones` las muestra con las columnas del tracker.
+- **Seguimiento:** gestiones por día, contactabilidad, ventas con contacto
+  previo y casos abiertos; descarga en formato tracker.

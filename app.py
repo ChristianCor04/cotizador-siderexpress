@@ -24,18 +24,36 @@ import config                                # noqa: E402
 import db                                    # noqa: E402
 import sesion                                # noqa: E402
 from paginas import (ferreterias, login, negociaciones,  # noqa: E402
-                     precios, productos, promociones, seguimiento)
+                     precios, productos, promociones, remarketing, seguimiento)
 
 
 # Qué pantallas ve cada rol.
 # Para agregar una pantalla nueva: créala en paginas/ y agrégala aquí.
 MENU = {
     "asesor":     ["Negociaciones", "Precios"],
-    "supervisor": ["Negociaciones", "Seguimiento", "Precios",
+    "supervisor": ["Negociaciones", "Remarketing", "Seguimiento", "Precios",
                    "Ferreterías", "Clientes"],
-    "master":     ["Negociaciones", "Seguimiento", "Precios", "Productos",
-                   "Ferreterías", "Clientes", "Promociones"],
+    "master":     ["Negociaciones", "Remarketing", "Seguimiento", "Precios",
+                   "Productos", "Ferreterías", "Clientes", "Promociones"],
 }
+# Orden de las pantallas cuando el usuario tiene módulos propios
+ORDEN_MODULOS = ["Negociaciones", "Remarketing", "Seguimiento", "Precios",
+                 "Productos", "Ferreterías", "Clientes", "Promociones"]
+
+
+def menu_de(usuario) -> list[str]:
+    """Pantallas del usuario: las de su rol, o sus módulos si los tiene.
+
+    m_usuarios.modulos vacío = según el rol. La asesora de remarketing tiene
+    {Remarketing}; un asesor que cotiza y llama, {Negociaciones,Precios,Remarketing}.
+    El master siempre ve todo.
+    """
+    if usuario.get("rol") == "master":
+        return MENU["master"]
+    modulos = usuario.get("modulos") or []
+    if modulos:
+        return [m for m in ORDEN_MODULOS if m in modulos] or ["Remarketing"]
+    return MENU.get(usuario.get("rol"), ["Negociaciones"])
 
 
 def main():
@@ -71,7 +89,7 @@ def main():
             st.caption("Zonas: " + ", ".join(zonas))
         st.divider()
 
-        opciones = MENU.get(usuario["rol"], ["Negociaciones"])
+        opciones = menu_de(usuario)
         pantalla = st.radio("Menú", opciones, label_visibility="collapsed")
 
         st.divider()
@@ -89,6 +107,7 @@ def main():
         "Seguimiento": seguimiento.mostrar,
         "Productos": productos.mostrar,
         "Ferreterías": ferreterias.mostrar,
+        "Remarketing": remarketing.mostrar,
     }
     if pantalla in pantallas:
         _mostrar_con_sesion_valida(pantallas[pantalla], usuario)

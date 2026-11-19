@@ -1151,3 +1151,73 @@ def ruc_de_sede(id_sede: int) -> str | None:
     filas = conectar().table("m_sedes").select("m_ferreterias(ruc)") \
         .eq("id_sede", id_sede).execute().data
     return ((filas[0].get("m_ferreterias") or {}).get("ruc")) if filas else None
+
+
+
+# ===========================================================================
+# REMARKETING
+# La asesora no ve Negociaciones: todo lo que necesita sale de funciones de
+# la base que validan su módulo. Solo se escribe con las funciones rmkt_*.
+# ===========================================================================
+
+def rmkt_bandeja() -> list[dict]:
+    """Casos abiertos que el usuario puede gestionar, con su negociación."""
+    filas = conectar().rpc("rmkt_bandeja", {}).execute().data or []
+    for f in filas:
+        f["monto"] = float(f["monto"]) if f.get("monto") is not None else None
+    return filas
+
+
+def rmkt_productos(id_caso: int) -> list[dict]:
+    return conectar().rpc("rmkt_productos_caso", {"p_id_caso": id_caso}).execute().data or []
+
+
+def rmkt_gestiones(id_caso: int) -> list[dict]:
+    return conectar().table("rmkt_gestiones").select("*, m_usuarios(nombre)") \
+        .eq("id_caso", id_caso).order("hora_fin", desc=True).execute().data or []
+
+
+def rmkt_gestiones_hoy() -> int:
+    """Gestiones que registró hoy el usuario actual."""
+    from config import hoy_lima
+    # El id sale de la sesión ya cargada: evita otra consulta al servidor
+    usuario = (st.session_state.get("usuario") or {}).get("id_usuario")
+    if not usuario:
+        return 0
+    filas = conectar().table("rmkt_gestiones").select("id_gestion", count="exact") \
+        .eq("id_usuario", usuario).gte("hora_fin", f"{hoy_lima()}T00:00:00-05:00").execute()
+    return filas.count or 0
+
+
+def rmkt_registrar_gestion(datos: dict) -> dict:
+    return conectar().rpc("rmkt_registrar_gestion", {"p": datos}).execute().data
+
+
+def rmkt_solicitar_llamada(id_negociacion: int, nota: str | None) -> int:
+    return conectar().rpc("rmkt_solicitar_llamada", {
+        "p_id_negociacion": id_negociacion, "p_nota": nota}).execute().data
+
+
+def rmkt_caso_de_negociacion(id_negociacion: int) -> dict | None:
+    filas = conectar().table("rmkt_casos").select("*, m_usuarios!rmkt_casos_id_usuario_asignado_fkey(nombre)") \
+        .eq("id_negociacion", id_negociacion).execute().data
+    return filas[0] if filas else None
+
+
+def rmkt_indicadores(desde, hasta) -> dict:
+    return conectar().rpc("rmkt_indicadores", {
+        "p_desde": str(desde), "p_hasta": str(hasta)}).execute().data or {}
+
+
+def rmkt_gestiones_periodo(desde, hasta) -> list[dict]:
+    """Gestiones del periodo en el formato del tracker, de 1,000 en 1,000."""
+    filas, inicio = [], 0
+    while True:
+        pagina = conectar().table("v_rmkt_gestiones").select("*") \
+            .gte("fecha_contacto", str(desde)).lte("fecha_contacto", str(hasta)) \
+            .order("id_gestion").range(inicio, inicio + 999).execute().data
+        filas.extend(pagina)
+        if len(pagina) < 1000:
+            break
+        inicio += 1000
+    return filas
