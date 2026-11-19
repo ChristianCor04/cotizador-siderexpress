@@ -542,7 +542,7 @@ descarga en Seguimiento con «Preparar competencia», por periodo.
 
 ## Remarketing
 
-Pantalla de la asesora de remarketing (archivo 52). Digitaliza su tracker.
+Pantalla «Llamadas» de la asesora de remarketing (archivos 52 y 53). Digitaliza su tracker.
 
 - **Quién la ve:** supervisores y master, y quien tenga el módulo en
   `m_usuarios.modulos`. La asesora tiene `{Remarketing}` y no ve Negociaciones.

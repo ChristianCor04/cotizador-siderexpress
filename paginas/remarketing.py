@@ -1,7 +1,8 @@
 """
-PANTALLA DE REMARKETING
-=======================
+PANTALLA DE LLAMADAS (módulo Remarketing)
+=========================================
 Bandeja de la asesora de remarketing. Digitaliza su tracker de Excel.
+En el menú se llama «Llamadas»; el módulo sigue siendo Remarketing.
 
   - Izquierda: los casos, en el orden en que se trabajan: urgentes (pedidos
     por un asesor con «Llamar»), luego los programados para hoy o atrasados,
@@ -52,9 +53,12 @@ def mostrar(usuario: dict):
     if mensaje:
         st.success(mensaje)
 
+    st.subheader("Llamadas")
     hoy = config.hoy_lima()
     casos = db.rmkt_bandeja()
     for c in casos:
+        c["fecha_cot"] = config.a_lima(c["fecha_ultima_cotizacion"]).date() \
+            if c.get("fecha_ultima_cotizacion") else None
         c["fecha_prox"] = date.fromisoformat(c["fecha_proximo_contacto"]) \
             if c.get("fecha_proximo_contacto") else None
         c["para_hoy"] = c["estado"] == "programado" and c["fecha_prox"] is not None \
@@ -70,17 +74,24 @@ def mostrar(usuario: dict):
     m3.metric("Programados para hoy", sum(1 for c in bandeja if c["para_hoy"]))
     m4.metric("Gestionados hoy", db.rmkt_gestiones_hoy())
 
-    col_vista, col_zona = st.columns([3, 1], vertical_alignment="bottom")
+    col_vista, col_fecha, col_zona = st.columns([2.2, 1.4, 1.2], vertical_alignment="bottom")
     vista = col_vista.segmented_control(
         "Vista", ["Bandeja", "Programados", "Recuperados"], default="Bandeja",
         key="rmkt_vista", label_visibility="collapsed") or "Bandeja"
+    rango = col_fecha.date_input(
+        "Fecha de cotización", value=[], max_value=hoy, format="DD/MM/YYYY",
+        key="rmkt_fechas", help="Filtra por la fecha de la última cotización. "
+                                "Elige el primer y el último día; vacío = todas.")
     zonas = sorted({c["zona"] or "Sin zona" for c in casos})
-    zona = col_zona.selectbox("Zona", ["Todas las zonas"] + zonas,
-                              label_visibility="collapsed", key="rmkt_zona")
+    zona = col_zona.selectbox("Zona", ["Todas las zonas"] + zonas, key="rmkt_zona")
 
     lista = {"Bandeja": bandeja, "Programados": programados, "Recuperados": recuperados}[vista]
     if zona != "Todas las zonas":
         lista = [c for c in lista if (c["zona"] or "Sin zona") == zona]
+    if rango:
+        desde = rango[0]
+        hasta = rango[1] if len(rango) > 1 else rango[0]
+        lista = [c for c in lista if c["fecha_cot"] and desde <= c["fecha_cot"] <= hasta]
     lista = _ordenar(lista, vista)
 
     if not lista:
@@ -112,14 +123,16 @@ def _ordenar(lista, vista):
         -(c["monto"] or 0)))
 
 
-def _etiqueta(c, hoy) -> str:
-    if c["prioridad"] == 1:
-        return "🔴 Urgente"
+def _prioridad(c) -> str:
+    return "🔴 Urgente" if c["prioridad"] == 1 else "Normal"
+
+
+def _estado(c, hoy) -> str:
     if c["para_hoy"]:
         atraso = (hoy - c["fecha_prox"]).days
         return "🟠 Para hoy" if atraso == 0 else f"🟠 Atrasado {atraso} d"
     if c["estado"] == "programado":
-        return f"📅 {c['fecha_prox']:%d/%m}"
+        return f"📅 Programado {c['fecha_prox']:%d/%m}"
     if c["estado"] == "recuperado":
         return "✅ " + (c.get("ultimo_resultado") or "Recuperado")
     return "Sin gestión" if not c.get("ultima_gestion") else "En gestión"
@@ -127,7 +140,9 @@ def _etiqueta(c, hoy) -> str:
 
 def _lista(lista, vista, hoy):
     tabla = pd.DataFrame([{
-        "Estado": _etiqueta(c, hoy),
+        "Prioridad": _prioridad(c),
+        "Estado": _estado(c, hoy),
+        "Fecha": c["fecha_cot"],
         "Cliente": c["cliente"] or "Sin nombre",
         "Monto": f"S/ {c['monto']:,.0f}" if c["monto"] else "—",
         "Zona": c["zona"] or "—",
@@ -140,8 +155,11 @@ def _lista(lista, vista, hoy):
         tabla, hide_index=True, width="stretch", height=min(38 + 35 * len(lista), 560),
         on_select="rerun", selection_mode="single-row",
         key=f"rmkt_tabla_{vista}_{st.session_state.rmkt_version}",
-        column_config={"Cierra en": st.column_config.TextColumn(
-            help="Días hasta que la negociación se cierra sola por inactividad")})
+        column_config={
+            "Fecha": st.column_config.DateColumn(
+                format="DD/MM/YYYY", help="Fecha de la última cotización"),
+            "Cierra en": st.column_config.TextColumn(
+                help="Días hasta que la negociación se cierra sola por inactividad")})
     st.caption(f"{len(lista)} caso(s) · urgentes, programados, monto ↓"
                if vista == "Bandeja" else f"{len(lista)} caso(s)")
 
@@ -158,7 +176,9 @@ def _detalle(caso, hoy):
     with st.container(border=True):
         st.markdown(f"##### {caso['cliente'] or 'Sin nombre'} · {caso['telefono'] or 'sin teléfono'}")
         st.caption(" · ".join(x for x in [
+            f"**ID CRM {caso['ticket']}**" if caso.get("ticket") else "Sin ID CRM",
             f"3-{caso['id_cotizacion']}" if caso.get("id_cotizacion") else None,
+            f"cotizado el {caso['fecha_cot']:%d/%m/%Y}" if caso.get("fecha_cot") else None,
             caso.get("ferreteria"), caso.get("distrito"), caso.get("zona"),
             f"Asesor: {caso['asesor']}" if caso.get("asesor") else None] if x))
         st.caption(" · ".join(x for x in [

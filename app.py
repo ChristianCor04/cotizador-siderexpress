@@ -36,6 +36,10 @@ MENU = {
     "master":     ["Negociaciones", "Remarketing", "Seguimiento", "Precios",
                    "Productos", "Ferreterías", "Clientes", "Promociones"],
 }
+# Nombre que se muestra en el menú, cuando difiere del nombre del módulo.
+# El módulo sigue llamándose Remarketing en m_usuarios.modulos.
+ETIQUETAS_MENU = {"Remarketing": "Llamadas"}
+
 # Orden de las pantallas cuando el usuario tiene módulos propios
 ORDEN_MODULOS = ["Negociaciones", "Remarketing", "Seguimiento", "Precios",
                  "Productos", "Ferreterías", "Clientes", "Promociones"]
@@ -90,7 +94,8 @@ def main():
         st.divider()
 
         opciones = menu_de(usuario)
-        pantalla = st.radio("Menú", opciones, label_visibility="collapsed")
+        pantalla = st.radio("Menú", opciones, label_visibility="collapsed",
+                            format_func=lambda p: ETIQUETAS_MENU.get(p, p))
 
         st.divider()
         if st.button("Cerrar sesión", width="stretch"):
